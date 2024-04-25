@@ -1,18 +1,19 @@
-use std::{str, vec};
+use std::{env, fs::File, io::BufReader, str, vec};
 
 use mpi::point_to_point::Status;
 use mpi::request::WaitGuard;
 use mpi::traits::*;
 use serde::{Deserialize, Serialize};
 
-type Row = Vec<i32>;
-type Column = Vec<i32>;
+type NumberType = f64;
+type Row = Vec<NumberType>;
+type Column = Vec<NumberType>;
 type Matrix = Vec<Row>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Subresult {
     index: (usize, usize),
-    result: i32,
+    result: NumberType,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -20,6 +21,12 @@ struct Subtask {
     index: (usize, usize),
     row: Row,
     column: Column,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct InputMatrices {
+    a: Matrix,
+    b: Matrix,
 }
 
 const TASK_TAG: i32 = 1;
@@ -32,18 +39,16 @@ fn main() {
     let rank = world.rank();
     let root_rank = 0;
 
-    let a = vec![vec![1, 2], vec![4, 5], vec![7, 8], vec![9, 0]];
-    let b = vec![vec![1, 2, 3, 4, 9], vec![6, 7, 8, 9, 0]];
-
     let start_time = mpi::time();
 
+    let (mut m, mut n) = (0, 0);
     if world.rank() == root_rank {
+        let (a, b) = read_input();
+        (m, n) = (a.len(), b[0].len());
         distribute_subtasks(&a, &b, &world);
     }
 
-    let (m, n) = (a.len(), b[0].len());
-
-    let mut result_matrix: Matrix = vec![vec![0; n]; m];
+    let mut result_matrix: Matrix = vec![vec![0.; n]; m];
     let mut count_received = 0;
 
     loop {
@@ -121,15 +126,31 @@ fn print_matrix(a: &Matrix) {
     }
 }
 
+fn read_input() -> (Matrix, Matrix) {
+    let args: Vec<String> = env::args().collect();
+    println!("{:?}", args);
+    if args.len() > 1 {
+        let input_file = File::open(&args[1]).unwrap();
+        let buf_reader = BufReader::new(input_file);
+        let input_matrices: InputMatrices = serde_json::from_reader(buf_reader).unwrap();
+        (input_matrices.a, input_matrices.b)
+    } else {
+        (
+            vec![vec![1., 2.], vec![4., 5.], vec![7., 8.], vec![9., 0.]],
+            vec![vec![1., 2., 3., 4., 9.], vec![6., 7., 8., 9., 0.]],
+        )
+    }
+}
+
 /// Performs a pairwise multiplication for two arrays and sums the results.
 ///
 /// * `row`: First array.
 /// * `column`: Second array.
-fn multiply_row_by_column(row: Vec<i32>, column: Vec<i32>) -> i32 {
+fn multiply_row_by_column(row: Row, column: Column) -> NumberType {
     assert_eq!(row.len(), column.len());
     row.into_iter()
         .zip(column.into_iter())
-        .fold(0, |sum, (a, b)| sum + a * b)
+        .fold(0., |sum, (a, b)| sum + a * b)
 }
 
 /// Transposes a 2D matrix.
@@ -139,7 +160,7 @@ fn matrix_transpose(a: &Matrix) -> Matrix {
     assert!(a.len() > 0);
     let (m, n) = (a.len(), a[0].len());
 
-    let mut result: Matrix = vec![vec![0; m]; n];
+    let mut result: Matrix = vec![vec![0.; m]; n];
     for i in 0..n {
         for j in 0..m {
             result[i][j] = a[j][i];
