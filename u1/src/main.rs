@@ -72,11 +72,11 @@ fn main() {
 
         // send back the result to the root process
         mpi::request::scope(|scope| {
-            let _sreq = world.process_at_rank(root_rank).immediate_send_with_tag(
+            let _sreq = WaitGuard::from(world.process_at_rank(root_rank).immediate_send_with_tag(
                 scope,
                 &serialized.as_bytes()[..],
                 RESULT_TAG,
-            );
+            ));
         });
     }
 }
