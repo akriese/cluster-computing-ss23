@@ -24,6 +24,7 @@ struct Subtask {
 
 const TASK_TAG: i32 = 1;
 const RESULT_TAG: i32 = 2;
+const EXIT_TAG: i32 = 3;
 
 fn main() {
     let universe = mpi::initialize().unwrap();
@@ -64,6 +65,7 @@ fn main() {
 
                 continue;
             }
+            EXIT_TAG => break,
             _ => (),
         }
 
@@ -97,6 +99,20 @@ fn main() {
 
     print_matrix(&result_matrix);
     println!("It took {} seconds to finish!", mpi::time() - start_time);
+
+    // signal all nodes other than root to terminate
+    if world.rank() == root_rank {
+        let dummy: Vec<i32> = vec![];
+        for i in 1..world.size() {
+            mpi::request::scope(|scope| {
+                let _sreq = WaitGuard::from(
+                    world
+                        .process_at_rank(i)
+                        .immediate_send_with_tag(scope, &dummy, EXIT_TAG),
+                );
+            });
+        }
+    }
 }
 
 fn print_matrix(a: &Matrix) {
