@@ -34,22 +34,37 @@ fn main() {
     let a = vec![vec![1, 2], vec![4, 5], vec![7, 8], vec![9, 0]];
     let b = vec![vec![1, 2, 3, 4, 9], vec![6, 7, 8, 9, 0]];
 
+    let start_time = mpi::time();
+
     if world.rank() == root_rank {
-        distribute_subtasks(a, b, &world);
+        distribute_subtasks(&a, &b, &world);
     }
 
-    let mut result_matrix: Matrix = vec![];
+    let (m, n) = (a.len(), b[0].len());
+
+    let mut result_matrix: Matrix = vec![vec![0; n]; m];
+    let mut count_received = 0;
 
     loop {
         let (msg, status): (Vec<u8>, Status) = world.any_process().receive_vec();
 
-        if status.tag() == RESULT_TAG {
-            println!("received result from rank {}", status.source_rank());
-            let result: Subresult =
-                serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
+        match status.tag() {
+            RESULT_TAG => {
+                println!("received result from rank {}", status.source_rank());
+                let result: Subresult =
+                    serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
-            result_matrix[result.index.0][result.index.1] = result.result;
-            continue;
+                result_matrix[result.index.0][result.index.1] = result.result;
+                count_received += 1;
+
+                if count_received == m * n {
+                    println!("It's all over!");
+                    break;
+                }
+
+                continue;
+            }
+            _ => (),
         }
 
         let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
@@ -78,6 +93,15 @@ fn main() {
                 RESULT_TAG,
             ));
         });
+    }
+
+    print_matrix(&result_matrix);
+    println!("It took {} seconds to finish!", mpi::time() - start_time);
+}
+
+fn print_matrix(a: &Matrix) {
+    for row in a {
+        println!("{:?}", row);
     }
 }
 
@@ -117,7 +141,7 @@ fn matrix_transpose(a: &Matrix) -> Matrix {
 /// * `a`: First matrix.
 /// * `b`: Second matrix.
 /// * `world`: The MPI world object that the program is being run in.
-fn distribute_subtasks(a: Matrix, b: Matrix, world: &mpi::topology::SimpleCommunicator) {
+fn distribute_subtasks(a: &Matrix, b: &Matrix, world: &mpi::topology::SimpleCommunicator) {
     let size = world.size();
 
     // dimensions of a: m x p
@@ -129,17 +153,17 @@ fn distribute_subtasks(a: Matrix, b: Matrix, world: &mpi::topology::SimpleCommun
     println!("A: {}x{}, B: {}x{}, result: {}x{}", m, _p, _p, n, m, n);
 
     // transpose b for an easier access to the rows
-    let b_translated = matrix_transpose(&b);
+    let b_transpose = matrix_transpose(&b);
 
     // dimensions of the resulting matrix c: m x n
     // iterate over every combination of rows of 'a' with columns of 'b'
-    let mut c = 1;
+    let mut c = 0;
     for i in 0..m {
         for j in 0..n {
             let msg = Subtask {
                 index: (i, j),
                 row: a[i].clone(),
-                column: b_translated[j].clone(),
+                column: b_transpose[j].clone(),
             };
             let serialized = serde_json::to_string(&msg).unwrap();
 
