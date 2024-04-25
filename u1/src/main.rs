@@ -22,6 +22,9 @@ struct Subtask {
     column: Column,
 }
 
+const TASK_TAG: i32 = 1;
+const RESULT_TAG: i32 = 2;
+
 fn main() {
     let universe = mpi::initialize().unwrap();
     let world = universe.world();
@@ -29,14 +32,26 @@ fn main() {
     let root_rank = 0;
 
     let a = vec![vec![1, 2], vec![4, 5], vec![7, 8], vec![9, 0]];
-    let b = vec![vec![1, 2, 3, 4], vec![6, 7, 8, 9]];
+    let b = vec![vec![1, 2, 3, 4, 9], vec![6, 7, 8, 9, 0]];
 
     if world.rank() == root_rank {
         distribute_subtasks(a, b, &world);
     }
 
+    let mut result_matrix: Matrix = vec![];
+
     loop {
         let (msg, status): (Vec<u8>, Status) = world.any_process().receive_vec();
+
+        if status.tag() == RESULT_TAG {
+            println!("received result from rank {}", status.source_rank());
+            let result: Subresult =
+                serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
+
+            result_matrix[result.index.0][result.index.1] = result.result;
+            continue;
+        }
+
         let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
         println!(
@@ -53,12 +68,15 @@ fn main() {
         };
 
         let serialized = serde_json::to_string(&send_result).unwrap();
+        println!("{}", serialized);
 
         // send back the result to the root process
         mpi::request::scope(|scope| {
-            let _sreq = world
-                .process_at_rank(root_rank)
-                .immediate_send(scope, &serialized.as_bytes()[..]);
+            let _sreq = world.process_at_rank(root_rank).immediate_send_with_tag(
+                scope,
+                &serialized.as_bytes()[..],
+                RESULT_TAG,
+            );
         });
     }
 }
@@ -108,6 +126,8 @@ fn distribute_subtasks(a: Matrix, b: Matrix, world: &mpi::topology::SimpleCommun
     // dimensions of b: p x n
     let (_p, n) = (b.len(), b[0].len());
 
+    println!("A: {}x{}, B: {}x{}, result: {}x{}", m, _p, _p, n, m, n);
+
     // transpose b for an easier access to the rows
     let b_translated = matrix_transpose(&b);
 
@@ -125,11 +145,12 @@ fn distribute_subtasks(a: Matrix, b: Matrix, world: &mpi::topology::SimpleCommun
 
             // send the serialized message
             mpi::request::scope(|scope| {
-                let _sreq = WaitGuard::from(
-                    world
-                        .process_at_rank(c % size)
-                        .immediate_send(scope, &serialized.as_bytes()[..]),
-                );
+                let _sreq =
+                    WaitGuard::from(world.process_at_rank(c % size).immediate_send_with_tag(
+                        scope,
+                        &serialized.as_bytes()[..],
+                        TASK_TAG,
+                    ));
             });
 
             c += 1;
