@@ -32,17 +32,16 @@ struct InputMatrices {
 const TASK_TAG: i32 = 1;
 const RESULT_TAG: i32 = 2;
 const EXIT_TAG: i32 = 3;
+const ROOT_RANK: i32 = 0;
 
 fn main() {
     let universe = mpi::initialize().unwrap();
     let world = universe.world();
-    let rank = world.rank();
-    let root_rank = 0;
 
     let start_time = mpi::time();
 
     let (mut m, mut n) = (0, 0);
-    if world.rank() == root_rank {
+    if world.rank() == ROOT_RANK {
         let (a, b) = read_input();
         (m, n) = (a.len(), b[0].len());
         distribute_subtasks(&a, &b, &world);
@@ -70,42 +69,14 @@ fn main() {
 
                 continue;
             }
+            TASK_TAG => handle_task(msg, status, &world),
             EXIT_TAG => break,
             _ => (),
         }
-
-        let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
-
-        dbg!(
-            "Process {} got task {:?}.\nStatus is: {:?}",
-            rank,
-            &task,
-            status
-        );
-
-        // calculate the value of the result matrix at task.index
-        let result = multiply_row_by_column(task.row, task.column);
-
-        let send_result = Subresult {
-            index: task.index,
-            result,
-        };
-
-        let serialized = serde_json::to_string(&send_result).unwrap();
-        dbg!("{}", &serialized);
-
-        // send back the result to the root process
-        mpi::request::scope(|scope| {
-            let _sreq = WaitGuard::from(world.process_at_rank(root_rank).immediate_send_with_tag(
-                scope,
-                &serialized.as_bytes()[..],
-                RESULT_TAG,
-            ));
-        });
     }
 
     // signal all nodes other than root to terminate
-    if world.rank() == root_rank {
+    if world.rank() == ROOT_RANK {
         print_matrix(&result_matrix);
         println!("It took {} seconds to finish!", mpi::time() - start_time);
 
@@ -122,12 +93,54 @@ fn main() {
     }
 }
 
+/// Handle the subtask in the given message and send back the result to the root.
+///
+/// * `msg`: Incoming message containing the serialized task.
+/// * `status`: Status of the incoming message.
+/// * `world`: MPI communicator object.
+fn handle_task(msg: Vec<u8>, status: Status, world: &mpi::topology::SimpleCommunicator) {
+    let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
+
+    dbg!(
+        "Process {} got task {:?}.\nStatus is: {:?}",
+        world.rank(),
+        &task,
+        status
+    );
+
+    // calculate the value of the result matrix at task.index
+    let result = multiply_row_by_column(task.row, task.column);
+
+    let send_result = Subresult {
+        index: task.index,
+        result,
+    };
+
+    let serialized = serde_json::to_string(&send_result).unwrap();
+    dbg!("{}", &serialized);
+
+    // send back the result to the root process
+    mpi::request::scope(|scope| {
+        let _sreq = WaitGuard::from(world.process_at_rank(ROOT_RANK).immediate_send_with_tag(
+            scope,
+            &serialized.as_bytes()[..],
+            RESULT_TAG,
+        ));
+    });
+}
+
+/// Prints a 2D matrix in the classical representation (rows are stacked vertically).
+///
+/// * `a`: The matrix to be printed.
 fn print_matrix(a: &Matrix) {
     for row in a {
         dbg!("{:?}", row);
     }
 }
 
+/// Reads the input json file if provided by a command line argument.
+///
+/// If no file path is provided, the returned matrices are small default.
 fn read_input() -> (Matrix, Matrix) {
     let args: Vec<String> = env::args().collect();
     println!("{:?}", args);
