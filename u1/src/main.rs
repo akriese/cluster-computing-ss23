@@ -56,7 +56,7 @@ fn main() {
 
         match status.tag() {
             RESULT_TAG => {
-                println!("received result from rank {}", status.source_rank());
+                dbg!("received result from rank {}", status.source_rank());
                 let result: Subresult =
                     serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
@@ -76,9 +76,11 @@ fn main() {
 
         let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
-        println!(
+        dbg!(
             "Process {} got task {:?}.\nStatus is: {:?}",
-            rank, task, status
+            rank,
+            &task,
+            status
         );
 
         // calculate the value of the result matrix at task.index
@@ -90,7 +92,7 @@ fn main() {
         };
 
         let serialized = serde_json::to_string(&send_result).unwrap();
-        println!("{}", serialized);
+        dbg!("{}", &serialized);
 
         // send back the result to the root process
         mpi::request::scope(|scope| {
@@ -102,11 +104,11 @@ fn main() {
         });
     }
 
-    print_matrix(&result_matrix);
-    println!("It took {} seconds to finish!", mpi::time() - start_time);
-
     // signal all nodes other than root to terminate
     if world.rank() == root_rank {
+        print_matrix(&result_matrix);
+        println!("It took {} seconds to finish!", mpi::time() - start_time);
+
         let dummy: Vec<i32> = vec![];
         for i in 1..world.size() {
             mpi::request::scope(|scope| {
@@ -122,7 +124,7 @@ fn main() {
 
 fn print_matrix(a: &Matrix) {
     for row in a {
-        println!("{:?}", row);
+        dbg!("{:?}", row);
     }
 }
 
