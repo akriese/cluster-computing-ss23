@@ -55,7 +55,7 @@ fn main() {
 
         match status.tag() {
             RESULT_TAG => {
-                println!("received result from rank {}", status.source_rank());
+                eprintln!("received result from rank {}", status.source_rank());
                 let result: Subresult =
                     serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
@@ -101,7 +101,7 @@ fn main() {
 fn handle_task(msg: Vec<u8>, status: Status, world: &mpi::topology::SimpleCommunicator) {
     let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
-    println!(
+    eprintln!(
         "Process {} got task {:?}.\nStatus is: {:?}",
         world.rank(),
         &task,
@@ -117,7 +117,7 @@ fn handle_task(msg: Vec<u8>, status: Status, world: &mpi::topology::SimpleCommun
     };
 
     let serialized = serde_json::to_string(&send_result).unwrap();
-    println!("{}", &serialized);
+    eprintln!("{}", &serialized);
 
     // send back the result to the root process
     mpi::request::scope(|scope| {

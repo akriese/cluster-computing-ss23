@@ -11,6 +11,9 @@ as otherwise no connections to other nodes are possible.
 
 A recommended bash function can be found in `run.sh`.
 
+This loop will execute `run.sh` with the big matrix with different numbers of processes:
+`for x in {2..100..5}; do printf "$x: "; ./run.sh $x input.json 2> /dev/null | grep 'It took' | cut -d' ' -f3; done;`
+
 ## Input
 
 Optionally, one can pass a command line argument to the program execution pointing to a
