@@ -13,20 +13,25 @@ type Matrix = Vec<Row>;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Subresult {
     index: (usize, usize),
-    result: NumberType,
+    result: Matrix,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Subtask {
     index: (usize, usize),
-    row: Row,
-    column: Column,
+    rows: Matrix,
+    columns: Matrix,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 struct InputMatrices {
     a: Matrix,
     b: Matrix,
+}
+
+struct MetaInfo {
+    m: usize,
+    n: usize,
 }
 
 const TASK_TAG: i32 = 1;
@@ -40,15 +45,28 @@ fn main() {
 
     let start_time = mpi::time();
 
-    let (mut m, mut n) = (0, 0);
+    let mut info_buffer;
     if world.rank() == ROOT_RANK {
         let (a, b) = read_input();
-        (m, n) = (a.len(), b[0].len());
-        distribute_subtasks(&a, &b, &world);
+        let stride = 4;
+        let (m, n) = (a.len(), b[0].len());
+        distribute_subtasks(&a, &b, &world, stride);
+        info_buffer = [m, n, stride];
+    } else {
+        info_buffer = [0, 0, 0];
     }
+
+    world
+        .process_at_rank(ROOT_RANK)
+        .broadcast_into(&mut info_buffer);
+
+    let [m, n, stride] = info_buffer;
+    let meta_info = MetaInfo { m, n };
 
     let mut result_matrix: Matrix = vec![vec![0.; n]; m];
     let mut count_received = 0;
+    let num_tasks = ((meta_info.m as f64 / stride as f64).ceil()
+        * (meta_info.n as f64 / stride as f64).ceil()) as usize;
 
     loop {
         let (msg, status): (Vec<u8>, Status) = world.any_process().receive_vec();
@@ -59,10 +77,15 @@ fn main() {
                 let result: Subresult =
                     serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
-                result_matrix[result.index.0][result.index.1] = result.result;
+                let (m, n) = (result.result.len(), result.result[0].len());
+                for i in 0..m {
+                    for j in 0..n {
+                        result_matrix[result.index.0 + i][result.index.1 + j] = result.result[i][j];
+                    }
+                }
                 count_received += 1;
 
-                if count_received == m * n {
+                if count_received == num_tasks {
                     println!("It's all over!");
                     break;
                 }
@@ -101,6 +124,9 @@ fn main() {
 fn handle_task(msg: Vec<u8>, status: Status, world: &mpi::topology::SimpleCommunicator) {
     let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
+    let (m, n) = (task.rows.len(), task.columns.len());
+    let mut result = vec![vec![0.; n]; m];
+
     eprintln!(
         "Process {} got task {:?}.\nStatus is: {:?}",
         world.rank(),
@@ -109,7 +135,11 @@ fn handle_task(msg: Vec<u8>, status: Status, world: &mpi::topology::SimpleCommun
     );
 
     // calculate the value of the result matrix at task.index
-    let result = multiply_row_by_column(task.row, task.column);
+    for i in 0..m {
+        for j in 0..n {
+            result[i][j] = multiply_row_by_column(&task.rows[i], &task.columns[j]);
+        }
+    }
 
     let send_result = Subresult {
         index: task.index,
@@ -161,7 +191,7 @@ fn read_input() -> (Matrix, Matrix) {
 ///
 /// * `row`: First array.
 /// * `column`: Second array.
-fn multiply_row_by_column(row: Row, column: Column) -> NumberType {
+fn multiply_row_by_column(row: &Row, column: &Column) -> NumberType {
     assert_eq!(row.len(), column.len());
     row.into_iter()
         .zip(column.into_iter())
@@ -193,7 +223,12 @@ fn matrix_transpose(a: &Matrix) -> Matrix {
 /// * `a`: First matrix.
 /// * `b`: Second matrix.
 /// * `world`: The MPI world object that the program is being run in.
-fn distribute_subtasks(a: &Matrix, b: &Matrix, world: &mpi::topology::SimpleCommunicator) {
+fn distribute_subtasks(
+    a: &Matrix,
+    b: &Matrix,
+    world: &mpi::topology::SimpleCommunicator,
+    stride: usize,
+) {
     let size = world.size();
 
     // dimensions of a: m x p
@@ -205,17 +240,27 @@ fn distribute_subtasks(a: &Matrix, b: &Matrix, world: &mpi::topology::SimpleComm
     println!("A: {}x{}, B: {}x{}, result: {}x{}", m, _p, _p, n, m, n);
 
     // transpose b for an easier access to the rows
-    let b_transpose = matrix_transpose(&b);
+    let b_transposed = matrix_transpose(&b);
 
     // dimensions of the resulting matrix c: m x n
     // iterate over every combination of rows of 'a' with columns of 'b'
     let mut c = 0;
-    for i in 0..m {
-        for j in 0..n {
+    for i in (0..m).step_by(stride) {
+        for j in (0..n).step_by(stride) {
             let msg = Subtask {
                 index: (i, j),
-                row: a[i].clone(),
-                column: b_transpose[j].clone(),
+                rows: a
+                    .into_iter()
+                    .cloned()
+                    .skip(i)
+                    .take(stride)
+                    .collect::<Matrix>(),
+                columns: (&b_transposed)
+                    .into_iter()
+                    .cloned()
+                    .skip(j)
+                    .take(stride)
+                    .collect::<Matrix>(),
             };
             let serialized = serde_json::to_string(&msg).unwrap();
 
