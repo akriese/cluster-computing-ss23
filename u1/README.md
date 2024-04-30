@@ -4,7 +4,12 @@ This solution is using the rsmpi crate to interface with the C libraries for MPI
 
 Build the project with `cargo build --release` and run it by executing `mpirun -np $NUM_PROCESSORS ./target/release/u1`.
 
-This assumes, that MPICH was installed previously.
+This assumes, that MPICH was installed previously (e.g. `sudo apt install mpich`).
+
+On the FU compute cluster, the flag `-mca btl_tcp_if_include eth0` has to be included
+as otherwise no connections to other nodes are possible.
+
+A recommended bash function can be found in `run.sh`.
 
 ## Input
 
