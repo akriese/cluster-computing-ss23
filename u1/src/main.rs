@@ -29,11 +29,6 @@ struct InputMatrices {
     b: Matrix,
 }
 
-struct MetaInfo {
-    m: usize,
-    n: usize,
-}
-
 const TASK_TAG: i32 = 1;
 const RESULT_TAG: i32 = 2;
 const EXIT_TAG: i32 = 3;
@@ -46,30 +41,29 @@ fn main() {
     let start_time = mpi::time();
 
     let mut info_buffer;
+    let mut count: usize = 0;
     if world.rank() == ROOT_RANK {
         let (a, b) = read_input();
         let stride = 4;
         let (m, n) = (a.len(), b[0].len());
-        distribute_subtasks(&a, &b, &world, stride);
-        info_buffer = [m, n, stride];
+        count = distribute_subtasks(&a, &b, &world, stride);
+        info_buffer = [m, n];
     } else {
-        info_buffer = [0, 0, 0];
+        info_buffer = [0, 0];
     }
 
     world
         .process_at_rank(ROOT_RANK)
         .broadcast_into(&mut info_buffer);
 
-    let [m, n, stride] = info_buffer;
-    let meta_info = MetaInfo { m, n };
+    let [m, n] = info_buffer;
 
     let mut result_matrix: Matrix = vec![vec![0.; n]; m];
     let mut count_received = 0;
-    let num_tasks = ((meta_info.m as f64 / stride as f64).ceil()
-        * (meta_info.n as f64 / stride as f64).ceil()) as usize;
 
     loop {
         let (msg, status): (Vec<u8>, Status) = world.any_process().receive_vec();
+        // println!("received from: {}", status.source_rank());
 
         match status.tag() {
             RESULT_TAG => {
@@ -85,7 +79,7 @@ fn main() {
                 }
                 count_received += 1;
 
-                if count_received == num_tasks {
+                if count_received == count {
                     println!("It's all over!");
                     break;
                 }
@@ -220,16 +214,19 @@ fn matrix_transpose(a: &Matrix) -> Matrix {
 /// Currently, one task is defined by the operations necessary for one position in the
 /// resulting matrix.
 ///
+/// Returns the number of created jobs.
+///
 /// * `a`: First matrix.
 /// * `b`: Second matrix.
 /// * `world`: The MPI world object that the program is being run in.
+/// * `stride`: Size of the 2D submatrix to send per task.
 fn distribute_subtasks(
     a: &Matrix,
     b: &Matrix,
     world: &mpi::topology::SimpleCommunicator,
     stride: usize,
-) {
-    let size = world.size();
+) -> usize {
+    let n_proc = world.size();
 
     // dimensions of a: m x p
     let (m, _p) = (a.len(), a[0].len());
@@ -266,15 +263,16 @@ fn distribute_subtasks(
 
             // send the serialized message
             mpi::request::scope(|scope| {
-                let _sreq =
-                    WaitGuard::from(world.process_at_rank(c % size).immediate_send_with_tag(
-                        scope,
-                        &serialized.as_bytes()[..],
-                        TASK_TAG,
-                    ));
+                let _sreq = WaitGuard::from(
+                    world
+                        .process_at_rank(c % (n_proc - 1) + 1)
+                        .immediate_send_with_tag(scope, &serialized.as_bytes()[..], TASK_TAG),
+                );
             });
 
             c += 1;
         }
     }
+
+    c as usize
 }
