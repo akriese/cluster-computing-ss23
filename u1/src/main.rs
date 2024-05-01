@@ -32,6 +32,7 @@ struct InputMatrices {
 const TASK_TAG: i32 = 1;
 const RESULT_TAG: i32 = 2;
 const EXIT_TAG: i32 = 3;
+
 const ROOT_RANK: i32 = 0;
 
 fn main() {
@@ -40,64 +41,27 @@ fn main() {
 
     let start_time = mpi::time();
 
-    let mut info_buffer;
-    let mut count: usize = 0;
     if world.rank() == ROOT_RANK {
         let (a, b) = read_input();
-        let stride = 4;
-        let (m, n) = (a.len(), b[0].len());
-        count = distribute_subtasks(&a, &b, &world, stride);
-        info_buffer = [m, n];
-    } else {
-        info_buffer = [0, 0];
-    }
 
-    world
-        .process_at_rank(ROOT_RANK)
-        .broadcast_into(&mut info_buffer);
-
-    let [m, n] = info_buffer;
-
-    let mut result_matrix: Matrix = vec![vec![0.; n]; m];
-    let mut count_received = 0;
-
-    loop {
-        let (msg, status): (Vec<u8>, Status) = world.any_process().receive_vec();
-        // println!("received from: {}", status.source_rank());
-
-        match status.tag() {
-            RESULT_TAG => {
-                eprintln!("received result from rank {}", status.source_rank());
-                let result: Subresult =
-                    serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
-
-                let (m, n) = (result.result.len(), result.result[0].len());
-                for i in 0..m {
-                    for j in 0..n {
-                        result_matrix[result.index.0 + i][result.index.1 + j] = result.result[i][j];
-                    }
-                }
-                count_received += 1;
-
-                if count_received == count {
-                    println!("It's all over!");
-                    break;
-                }
-
-                continue;
-            }
-            TASK_TAG => handle_task(msg, status, &world),
-            EXIT_TAG => break,
-            _ => (),
+        if world.size() == 1 {
+            let result_matrix = calculate_whole_multiplication(&a, &b);
+            print_matrix(&result_matrix);
+            println!("It took {} seconds to finish!", mpi::time() - start_time);
+            return;
         }
-    }
 
-    // signal all nodes other than root to terminate
-    if world.rank() == ROOT_RANK {
+        let stride = 12;
+        let (m, n) = (a.len(), b[0].len());
+        let tasks = create_tasks(&a, &b, stride);
+        let result_matrix = distribute_and_collect(&tasks, &world, m, n, stride);
+
         print_matrix(&result_matrix);
         println!("It took {} seconds to finish!", mpi::time() - start_time);
 
         let dummy: Vec<i32> = vec![];
+
+        // signal all nodes other than root to terminate
         for i in 1..world.size() {
             mpi::request::scope(|scope| {
                 let _sreq = WaitGuard::from(
@@ -107,7 +71,105 @@ fn main() {
                 );
             });
         }
+    } else {
+        // behavior for all other processes than root ("workers")
+        loop {
+            let (msg, status): (Vec<u8>, Status) = world.any_process().receive_vec();
+
+            match status.tag() {
+                TASK_TAG => handle_task(msg, status, &world),
+                EXIT_TAG => break,
+                _ => (),
+            }
+        }
     }
+}
+
+/// Performs the matrix multiplication in one go.
+///
+/// * `a`: First matrix.
+/// * `b`: Second matrix.
+fn calculate_whole_multiplication(a: &Matrix, b: &Matrix) -> Matrix {
+    let mut result = vec![vec![0.0; b[0].len()]; a.len()];
+
+    let b_transposed = matrix_transpose(b);
+
+    for (i, row) in a.iter().enumerate() {
+        for (j, column) in b_transposed.iter().enumerate() {
+            result[i][j] = multiply_row_by_column(row, column);
+        }
+    }
+
+    result
+}
+
+/// Distribute all tasks asynchronously and simultaneosly wait for the answers to come
+/// back from the worker processes. Under the hood, the operations MPI_Isend and MPI_Irecv
+/// are used to enable the quickest processing.
+///
+/// * `tasks`: List of tasks serialized to json strings.
+/// * `world`: rsmpi communicator to send requests over.
+/// * `m`: Number of rows in the result matrix.
+/// * `n`: Number of columns in the result matrix.
+fn distribute_and_collect(
+    tasks: &Vec<String>,
+    world: &mpi::topology::SimpleCommunicator,
+    m: usize,
+    n: usize,
+    stride: usize,
+) -> Matrix {
+    let n_proc = world.size();
+
+    // we need buffers for the immediate_receive to store the message in.
+    // the json encoding takes up to 20 bytes for each number. We are generous with the
+    // extra 100 bytes for the encoding.
+    let recv_buffer_size = 100 + 20 * stride * stride;
+    let mut result_collection: Vec<Vec<u8>> = vec![vec![0; recv_buffer_size]; tasks.len()];
+    let mut result_matrix: Matrix = vec![vec![0.; n]; m];
+
+    mpi::request::multiple_scope(2 * tasks.len() as usize, |scope, coll| {
+        // start all send subtask ops asynchronously
+        for (i, task) in tasks.iter().enumerate() {
+            let sreq = world
+                .process_at_rank(i as i32 % (n_proc - 1) + 1)
+                .immediate_send_with_tag(scope, &task.as_bytes()[..], TASK_TAG);
+            coll.add(sreq);
+        }
+
+        // start all receive subresult ops asynchronously
+        for (i, recv_buf) in result_collection.iter_mut().enumerate() {
+            let rreq = world
+                .process_at_rank(i as i32 % (n_proc - 1) + 1)
+                .immediate_receive_into_with_tag(scope, &mut recv_buf[..], RESULT_TAG);
+
+            coll.add(rreq);
+        }
+
+        // wait for all requests and process the results from receive operations
+        while coll.incomplete() > 0 {
+            let (r_id, _status, msg) = coll.wait_any().unwrap();
+
+            // skip the send requests
+            if r_id < tasks.len() {
+                continue;
+            }
+
+            // search for the last actual position of the message
+            // inside the fixed length buffer
+            let end_pos = msg.iter().position(|c| *c == 0 as u8).unwrap();
+            let result: Subresult =
+                serde_json::from_str(str::from_utf8(&msg[..end_pos]).unwrap()).unwrap();
+
+            let (m, n) = (result.result.len(), result.result[0].len());
+            for i in 0..m {
+                for j in 0..n {
+                    result_matrix[result.index.0 + i][result.index.1 + j] = result.result[i][j];
+                }
+            }
+        }
+    });
+
+    result_matrix
 }
 
 /// Handle the subtask in the given message and send back the result to the root.
@@ -118,22 +180,15 @@ fn main() {
 fn handle_task(msg: Vec<u8>, status: Status, world: &mpi::topology::SimpleCommunicator) {
     let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
-    let (m, n) = (task.rows.len(), task.columns.len());
-    let mut result = vec![vec![0.; n]; m];
-
-    eprintln!(
-        "Process {} got task {:?}.\nStatus is: {:?}",
-        world.rank(),
-        &task,
-        status
-    );
+    // eprintln!(
+    //     "Process {} got task {:?}.\nStatus is: {:?}",
+    //     world.rank(),
+    //     &task,
+    //     status
+    // );
 
     // calculate the value of the result matrix at task.index
-    for i in 0..m {
-        for j in 0..n {
-            result[i][j] = multiply_row_by_column(&task.rows[i], &task.columns[j]);
-        }
-    }
+    let result = calculate_whole_multiplication(&task.rows, &task.columns);
 
     let send_result = Subresult {
         index: task.index,
@@ -141,7 +196,7 @@ fn handle_task(msg: Vec<u8>, status: Status, world: &mpi::topology::SimpleCommun
     };
 
     let serialized = serde_json::to_string(&send_result).unwrap();
-    eprintln!("{}", &serialized);
+    // eprintln!("{}", &serialized);
 
     // send back the result to the root process
     mpi::request::scope(|scope| {
@@ -209,7 +264,7 @@ fn matrix_transpose(a: &Matrix) -> Matrix {
     return result;
 }
 
-/// Distributes tasks of the matrix multiplication.
+/// Creates tasks of the matrix multiplication.
 ///
 /// Currently, one task is defined by the operations necessary for one position in the
 /// resulting matrix.
@@ -218,16 +273,8 @@ fn matrix_transpose(a: &Matrix) -> Matrix {
 ///
 /// * `a`: First matrix.
 /// * `b`: Second matrix.
-/// * `world`: The MPI world object that the program is being run in.
 /// * `stride`: Size of the 2D submatrix to send per task.
-fn distribute_subtasks(
-    a: &Matrix,
-    b: &Matrix,
-    world: &mpi::topology::SimpleCommunicator,
-    stride: usize,
-) -> usize {
-    let n_proc = world.size();
-
+fn create_tasks(a: &Matrix, b: &Matrix, stride: usize) -> Vec<String> {
     // dimensions of a: m x p
     let (m, _p) = (a.len(), a[0].len());
 
@@ -241,7 +288,7 @@ fn distribute_subtasks(
 
     // dimensions of the resulting matrix c: m x n
     // iterate over every combination of rows of 'a' with columns of 'b'
-    let mut c = 0;
+    let mut tasks = vec![];
     for i in (0..m).step_by(stride) {
         for j in (0..n).step_by(stride) {
             let msg = Subtask {
@@ -259,20 +306,9 @@ fn distribute_subtasks(
                     .take(stride)
                     .collect::<Matrix>(),
             };
-            let serialized = serde_json::to_string(&msg).unwrap();
-
-            // send the serialized message
-            mpi::request::scope(|scope| {
-                let _sreq = WaitGuard::from(
-                    world
-                        .process_at_rank(c % (n_proc - 1) + 1)
-                        .immediate_send_with_tag(scope, &serialized.as_bytes()[..], TASK_TAG),
-                );
-            });
-
-            c += 1;
+            tasks.push(serde_json::to_string(&msg).unwrap());
         }
     }
 
-    c as usize
+    tasks
 }
