@@ -42,7 +42,7 @@ fn main() {
     let start_time = mpi::time();
 
     if world.rank() == ROOT_RANK {
-        let (a, b) = read_input();
+        let (a, b, stride) = read_input();
 
         if world.size() == 1 {
             let result_matrix = calculate_whole_multiplication(&a, &b);
@@ -51,7 +51,6 @@ fn main() {
             return;
         }
 
-        let stride = 12;
         let (m, n) = (a.len(), b[0].len());
         let tasks = create_tasks(&a, &b, stride);
         let result_matrix = distribute_and_collect(&tasks, &world, m, n, stride);
@@ -219,11 +218,15 @@ fn print_matrix(a: &Matrix) {
 
 /// Reads the input json file if provided by a command line argument.
 ///
+/// The arguments to this program are expected to be:
+/// 1. the file path to the json file containing the input matrices.
+/// 2. the stride (integer) used to bundle subtasks.
+///
 /// If no file path is provided, the returned matrices are small default.
-fn read_input() -> (Matrix, Matrix) {
+fn read_input() -> (Matrix, Matrix, usize) {
     let args: Vec<String> = env::args().collect();
     println!("{:?}", args);
-    if args.len() > 1 {
+    let (a, b) = if args.len() > 1 {
         let input_file = File::open(&args[1]).unwrap();
         let buf_reader = BufReader::new(input_file);
         let input_matrices: InputMatrices = serde_json::from_reader(buf_reader).unwrap();
@@ -233,7 +236,15 @@ fn read_input() -> (Matrix, Matrix) {
             vec![vec![1., 2.], vec![4., 5.], vec![7., 8.], vec![9., 0.]],
             vec![vec![1., 2., 3., 4., 9.], vec![6., 7., 8., 9., 0.]],
         )
-    }
+    };
+
+    let stride: usize = if args.len() == 3 {
+        args[2].parse::<usize>().unwrap()
+    } else {
+        4
+    };
+
+    (a, b, stride)
 }
 
 /// Performs a pairwise multiplication for two arrays and sums the results.
