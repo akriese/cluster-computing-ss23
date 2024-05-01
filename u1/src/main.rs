@@ -42,21 +42,7 @@ fn main() {
     let start_time = mpi::time();
 
     if world.rank() == ROOT_RANK {
-        let (a, b, stride) = read_input();
-
-        if world.size() == 1 {
-            let result_matrix = calculate_whole_multiplication(&a, &b);
-            print_matrix(&result_matrix);
-            println!("It took {} seconds to finish!", mpi::time() - start_time);
-            return;
-        }
-
-        let (m, n) = (a.len(), b[0].len());
-        let tasks = create_tasks(&a, &b, stride);
-        let result_matrix = distribute_and_collect(&tasks, &world, m, n, stride);
-
-        print_matrix(&result_matrix);
-        println!("It took {} seconds to finish!", mpi::time() - start_time);
+        let result_matrix = root_workflow(&world);
 
         let dummy: Vec<i32> = vec![];
 
@@ -70,13 +56,16 @@ fn main() {
                 );
             });
         }
+
+        // print_matrix(&result_matrix);
+        println!("It took {} seconds to finish!", mpi::time() - start_time);
     } else {
         // behavior for all other processes than root ("workers")
         loop {
             let (msg, status): (Vec<u8>, Status) = world.any_process().receive_vec();
 
             match status.tag() {
-                TASK_TAG => handle_task(msg, status, &world),
+                TASK_TAG => handle_task(msg, &world),
                 EXIT_TAG => break,
                 _ => (),
             }
@@ -84,14 +73,38 @@ fn main() {
     }
 }
 
+/// The overall work of the root node. Read input, create tasks, distribute them and
+/// collect the subresults.
+/// If there is no other process in the system, everything is done locally.
+///
+/// * `world`: MPI communicator to send request over.
+fn root_workflow(world: &mpi::topology::SimpleCommunicator) -> Matrix {
+    let (a, b, stride) = read_input();
+
+    if world.size() == 1 {
+        return calculate_whole_multiplication(&a, &b, None);
+    }
+
+    let (m, n) = (a.len(), b[0].len());
+    let tasks = create_tasks(&a, &b, stride);
+    distribute_and_collect(&tasks, world, m, n, stride)
+}
+
 /// Performs the matrix multiplication in one go.
 ///
 /// * `a`: First matrix.
 /// * `b`: Second matrix.
-fn calculate_whole_multiplication(a: &Matrix, b: &Matrix) -> Matrix {
-    let mut result = vec![vec![0.0; b[0].len()]; a.len()];
+fn calculate_whole_multiplication(a: &Matrix, b: &Matrix, transpose_b: Option<bool>) -> Matrix {
+    let b_transposed: &Matrix;
+    let mut _bt: Matrix;
+    if transpose_b.unwrap_or(true) {
+        _bt = matrix_transpose(b);
+        b_transposed = &_bt;
+    } else {
+        b_transposed = b;
+    };
 
-    let b_transposed = matrix_transpose(b);
+    let mut result = vec![vec![0.0; b_transposed.len()]; a.len()];
 
     for (i, row) in a.iter().enumerate() {
         for (j, column) in b_transposed.iter().enumerate() {
@@ -174,20 +187,12 @@ fn distribute_and_collect(
 /// Handle the subtask in the given message and send back the result to the root.
 ///
 /// * `msg`: Incoming message containing the serialized task.
-/// * `status`: Status of the incoming message.
 /// * `world`: MPI communicator object.
-fn handle_task(msg: Vec<u8>, status: Status, world: &mpi::topology::SimpleCommunicator) {
+fn handle_task(msg: Vec<u8>, world: &mpi::topology::SimpleCommunicator) {
     let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
-    // eprintln!(
-    //     "Process {} got task {:?}.\nStatus is: {:?}",
-    //     world.rank(),
-    //     &task,
-    //     status
-    // );
-
     // calculate the value of the result matrix at task.index
-    let result = calculate_whole_multiplication(&task.rows, &task.columns);
+    let result = calculate_whole_multiplication(&task.rows, &task.columns, Some(false));
 
     let send_result = Subresult {
         index: task.index,
@@ -195,7 +200,6 @@ fn handle_task(msg: Vec<u8>, status: Status, world: &mpi::topology::SimpleCommun
     };
 
     let serialized = serde_json::to_string(&send_result).unwrap();
-    // eprintln!("{}", &serialized);
 
     // send back the result to the root process
     mpi::request::scope(|scope| {
@@ -253,8 +257,8 @@ fn read_input() -> (Matrix, Matrix, usize) {
 /// * `column`: Second array.
 fn multiply_row_by_column(row: &Row, column: &Column) -> NumberType {
     assert_eq!(row.len(), column.len());
-    row.into_iter()
-        .zip(column.into_iter())
+    row.iter()
+        .zip(column.iter())
         .fold(0., |sum, (a, b)| sum + a * b)
 }
 
