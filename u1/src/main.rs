@@ -133,9 +133,9 @@ fn distribute_and_collect(
     let n_proc = world.size();
 
     // we need buffers for the immediate_receive to store the message in.
-    // the json encoding takes up to 20 bytes for each number. We are generous with the
+    // the json encoding takes up to 25 bytes for each number. We are generous with the
     // extra 100 bytes for the encoding.
-    let recv_buffer_size = 100 + 20 * stride * stride;
+    let recv_buffer_size = 100 + 25 * stride * stride;
     let mut result_collection: Vec<Vec<u8>> = vec![vec![0; recv_buffer_size]; tasks.len()];
     let mut result_matrix: Matrix = vec![vec![0.; n]; m];
 
