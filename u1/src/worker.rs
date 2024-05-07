@@ -13,7 +13,7 @@ pub(crate) fn handle_task(msg: Vec<u8>, world: &mpi::topology::SimpleCommunicato
     let task: Subtask = serde_json::from_str(str::from_utf8(msg.as_slice()).unwrap()).unwrap();
 
     // calculate the value of the result matrix at task.index
-    let result = matrix::calculate_whole_multiplication(&task.rows, &task.columns, Some(false));
+    let result = matrix::multiplication(&task.rows, &task.columns, Some(false));
 
     let send_result = Subresult {
         index: task.index,

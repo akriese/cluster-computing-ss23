@@ -24,11 +24,7 @@ pub(crate) fn multiply_row_by_column(row: &Row, column: &Column) -> NumberType {
 ///
 /// * `a`: First matrix.
 /// * `b`: Second matrix.
-pub(crate) fn calculate_whole_multiplication(
-    a: &Matrix,
-    b: &Matrix,
-    transpose_b: Option<bool>,
-) -> Matrix {
+pub(crate) fn multiplication(a: &Matrix, b: &Matrix, transpose_b: Option<bool>) -> Matrix {
     let b_transposed: &Matrix;
     let mut _bt: Matrix;
     if transpose_b.unwrap_or(true) {

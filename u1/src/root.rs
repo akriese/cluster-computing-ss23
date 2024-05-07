@@ -14,7 +14,7 @@ pub(crate) fn root_workflow(world: &mpi::topology::SimpleCommunicator) -> Matrix
     let (a, b, stride) = read_input();
 
     if world.size() == 1 {
-        return matrix::calculate_whole_multiplication(&a, &b, None);
+        return matrix::multiplication(&a, &b, None);
     }
 
     let (m, n) = (a.len(), b[0].len());
