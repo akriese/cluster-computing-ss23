@@ -5,20 +5,54 @@ use super::{RESULT_TAG, TASK_TAG};
 use mpi::traits::*;
 use std::{env, fs::File, io::BufReader, str};
 
+fn get_stride(m: usize, n: usize, num_proc: usize) -> usize {
+    // binary search
+    let mut stride = 2;
+    loop {
+        let num_tasks = (m as f64 / stride as f64).ceil() * (n as f64 / stride as f64).ceil();
+        if (num_tasks as usize) < num_proc {
+            break;
+        }
+
+        stride *= 2;
+    }
+
+    let (mut a, mut b) = (stride / 2, stride);
+    println!("{}, {}", a, b);
+    loop {
+        let c = (a + b) / 2;
+        let num_tasks = (m as f64 / c as f64).ceil() * (n as f64 / c as f64).ceil();
+        if (num_tasks as usize) <= num_proc {
+            b = c;
+        } else {
+            a = c;
+        }
+        println!("{}, {}, {}", a, b, num_tasks);
+
+        if b - a < 2 {
+            break;
+        }
+    }
+
+    b
+}
+
 /// The overall work of the root node. Read input, create tasks, distribute them and
 /// collect the subresults.
 /// If there is no other process in the system, everything is done locally.
 ///
 /// * `world`: MPI communicator to send request over.
 pub(crate) fn root_workflow(world: &mpi::topology::SimpleCommunicator) -> Matrix {
-    let (a, b, stride) = read_input();
+    let (a, b) = read_input();
 
     if world.size() == 1 {
         return matrix::multiplication(&a, &b, None);
     }
 
     let (m, n) = (a.len(), b[0].len());
+    let stride = get_stride(m, n, world.size() as usize - 1);
     let tasks = create_tasks(&a, &b, stride);
+    println!("Stride is {}, #tasks is {}", stride, tasks.len());
     distribute_and_collect(&tasks, world, m, n, stride)
 }
 
@@ -95,10 +129,9 @@ pub(crate) fn distribute_and_collect(
 ///
 /// The arguments to this program are expected to be:
 /// 1. the file path to the json file containing the input matrices.
-/// 2. the stride (integer) used to bundle subtasks.
 ///
 /// If no file path is provided, the returned matrices are small default.
-pub(crate) fn read_input() -> (Matrix, Matrix, usize) {
+pub(crate) fn read_input() -> (Matrix, Matrix) {
     let args: Vec<String> = env::args().collect();
     println!("{:?}", args);
     let (a, b) = if args.len() > 1 {
@@ -113,13 +146,7 @@ pub(crate) fn read_input() -> (Matrix, Matrix, usize) {
         )
     };
 
-    let stride: usize = if args.len() == 3 {
-        args[2].parse::<usize>().unwrap()
-    } else {
-        4
-    };
-
-    (a, b, stride)
+    (a, b)
 }
 
 /// Creates tasks of the matrix multiplication.
