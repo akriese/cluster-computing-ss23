@@ -1,4 +1,5 @@
 use super::{Column, Matrix, NumberType, Row};
+use rand::{thread_rng, Rng};
 
 /// Prints a 2D matrix in the classical representation (rows are stacked vertically).
 ///
@@ -60,4 +61,13 @@ pub(crate) fn matrix_transpose(a: &Matrix) -> Matrix {
     }
 
     return result;
+}
+
+pub(crate) fn generate_2d(m: usize, n: usize) -> Matrix {
+    let mut result = vec![vec![0.0; n]; m];
+    for row in result.iter_mut() {
+        thread_rng().fill(&mut row[..]);
+    }
+
+    result
 }
