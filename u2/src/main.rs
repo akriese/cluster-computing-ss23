@@ -8,6 +8,13 @@ const ROOT_RANK: usize = 0;
 const G: f64 = 6.67e-11f64;
 const TIMESTEPS: f64 = 0.1;
 
+fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
+    let mut result = vec![0f64; n];
+    thread_rng().fill(&mut result[..]);
+
+    result.iter().map(|x| x * (max - min) + min).collect()
+}
+
 fn main() {
     let universe = mpi::initialize().unwrap();
     let world = universe.world();
@@ -27,13 +34,13 @@ fn main() {
 
     // root creates input
     if rank == ROOT_RANK {
-        thread_rng().fill(&mut masses[..N_BODIES]);
-
-        // dummy values
-        all_positions = (0..filled_n * 2).map(|x| x as f64).collect::<Vec<f64>>();
-        // use this otherwise for random values:
-        // thread_rng().fill(&mut all_positions[..N_BODIES*2]);
+        masses = generate_random_bounded(filled_n, 5e2, 5e3);
+        all_positions = generate_random_bounded(filled_n * 2, -1e1, 1e1);
     }
+
+    // if rank == ROOT_RANK {
+    //     println!("Masses: {:?}", masses);
+    // }
 
     // root sends masses
     root_proc.broadcast_into(&mut masses);
@@ -44,14 +51,15 @@ fn main() {
     // root sends initial coordinates to everyone
     root_proc.broadcast_into(&mut all_positions);
 
+    // if rank == ROOT_RANK {
+    //     println!("{:?}", all_positions);
+    // }
+
     // root sends initial velocity to respective ranks
     let mut local_velocities = vec![0f64; bodies_per_proc * 2];
     if rank == ROOT_RANK {
-        let mut init_velocities: Vec<f64> = vec![0f64; filled_n * 2];
-
-        init_velocities = all_positions.clone();
-        // use this for random values instead:
-        // thread_rng().fill(&mut init_velocities[..N_BODIES * 2]);
+        let init_velocities = generate_random_bounded(filled_n * 2, -1e0, 1e0);
+        // let init_velocities = vec![0f64; filled_n * 2];
         root_proc.scatter_into_root(&init_velocities, &mut local_velocities);
     } else {
         root_proc.scatter_into(&mut local_velocities);
@@ -81,13 +89,8 @@ fn main() {
         world.barrier();
 
         // if rank == ROOT_RANK {
-        //     println!("Step {} finished!", t);
+        //     println!("{:?}", all_positions);
         // }
-
-        // println!(
-        //     "Process {} at step {} got positions {:?}",
-        //     rank, t, all_positions
-        // );
     }
 
     if rank == ROOT_RANK {
