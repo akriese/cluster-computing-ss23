@@ -5,7 +5,7 @@ use rand::{thread_rng, Rng};
 const N_BODIES: usize = 1000;
 const N_STEPS: usize = 1000;
 const ROOT_RANK: usize = 0;
-const G: f64 = 3.14;
+const G: f64 = 6.67e-11f64;
 const TIMESTEPS: f64 = 0.1;
 
 fn main() {
