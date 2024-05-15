@@ -1,9 +1,12 @@
+use itertools::Itertools;
 use mpi::traits::*;
 use rand::{thread_rng, Rng};
 
-const N_BODIES: usize = 4000;
-const N_STEPS: usize = 5000;
+const N_BODIES: usize = 1000;
+const N_STEPS: usize = 1000;
 const ROOT_RANK: usize = 0;
+const G: f64 = 3.14;
+const TIMESTEPS: f64 = 0.1;
 
 fn main() {
     let universe = mpi::initialize().unwrap();
@@ -64,12 +67,22 @@ fn main() {
 
     for t in 0..N_STEPS {
         // calculate their velocity and positions
-        (local_positions, local_velocities) =
-            calculate_positions(&masses, &local_velocities, &local_positions, &all_positions);
+        (local_positions, local_velocities) = calculate_next_step(
+            &local_velocities,
+            &local_positions,
+            rank,
+            &masses,
+            &all_positions,
+            TIMESTEPS,
+        );
 
         // send new positions with MPI_Allgather
         world.all_gather_into(&local_positions, &mut all_positions);
         world.barrier();
+
+        // if rank == ROOT_RANK {
+        //     println!("Step {} finished!", t);
+        // }
 
         // println!(
         //     "Process {} at step {} got positions {:?}",
@@ -82,20 +95,67 @@ fn main() {
     }
 }
 
-fn calculate_positions(
-    masses: &Vec<f64>,
+fn calculate_next_step(
     local_velocities: &Vec<f64>,
     local_positions: &Vec<f64>,
+    local_offset: usize,
+    masses: &Vec<f64>,
     all_positions: &Vec<f64>,
+    timestep: f64,
 ) -> (Vec<f64>, Vec<f64>) {
-    return (
-        local_positions
-            .iter()
-            .map(|x| x + 1f64)
-            .collect::<Vec<f64>>(),
-        local_velocities
-            .iter()
-            .map(|x| x * 2f64)
-            .collect::<Vec<f64>>(),
-    );
+    let n = local_positions.len();
+
+    assert!(n % 2 == 0);
+
+    let mut new_velocities = vec![0f64; n];
+    let mut new_positions = vec![0f64; n];
+
+    for i in 0..n / 2 {
+        let range = i * 2..(i + 1) * 2;
+        let p: &[f64; 2] = &local_positions[range.clone()].try_into().unwrap();
+        let v: &[f64; 2] = &local_velocities[range.clone()].try_into().unwrap();
+        let m = masses[local_offset + i];
+        let f = calc_force(p, m, all_positions, masses);
+        let new_v = calc_velocity(v, &f, m, timestep);
+        let new_p = calc_position(&new_v, p, timestep);
+
+        new_velocities[range.clone()].copy_from_slice(&new_v);
+        new_positions[range.clone()].copy_from_slice(&new_p);
+    }
+
+    (new_positions, new_velocities)
+}
+
+fn calc_velocity(old_velocity: &[f64; 2], force: &[f64; 2], mass: f64, timestep: f64) -> [f64; 2] {
+    let [v_x, v_y] = old_velocity;
+    let [f_x, f_y] = force;
+    return [v_x + f_x / mass * timestep, v_y + f_y / mass * timestep];
+}
+
+fn calc_position(velocity: &[f64; 2], old_position: &[f64; 2], timestep: f64) -> [f64; 2] {
+    let [v_x, v_y] = velocity;
+    let [x, y] = old_position;
+    return [x + v_x * timestep, y + v_y * timestep];
+}
+
+fn calc_force(
+    self_position: &[f64; 2],
+    self_mass: f64,
+    other_positions: &Vec<f64>,
+    masses: &Vec<f64>,
+) -> [f64; 2] {
+    let mut summed_force = [0f64; 2];
+    let [self_x, self_y] = self_position;
+    for (i, (x, y)) in other_positions.iter().tuples().enumerate() {
+        let (d_x, d_y) = (x - self_x, y - self_y);
+        if d_x == 0f64 && d_y == 0f64 {
+            continue;
+        }
+        let r = (d_x * d_x + d_y * d_y).sqrt();
+        let f = G * self_mass * masses[i] / (r * r);
+        summed_force[0] += f + d_x / r;
+        summed_force[1] += f + d_y / r;
+    }
+
+    return summed_force;
 }
