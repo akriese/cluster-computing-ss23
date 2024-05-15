@@ -1,12 +1,32 @@
+use clap::Parser;
 use itertools::Itertools;
 use mpi::traits::*;
 use rand::{thread_rng, Rng};
 
-const N_BODIES: usize = 1000;
-const N_STEPS: usize = 1000;
 const ROOT_RANK: usize = 0;
 const G: f64 = 6.67e-11f64;
-const TIMESTEPS: f64 = 0.1;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about=None)]
+struct Args {
+    #[arg(short = 'M', default_value_t = 1e3f64)]
+    mass_max: f64,
+
+    #[arg(short = 'P', default_value_t = 1e2f64)]
+    pos_max: f64,
+
+    #[arg(short = 'S', default_value_t = 1e0f64)]
+    velocity_max: f64,
+
+    #[arg(short = 'n', default_value_t = 1000)]
+    n_bodies: usize,
+
+    #[arg(short = 's', default_value_t = 1000)]
+    n_steps: usize,
+
+    #[arg(short = 'l', default_value_t = 0.1)]
+    step_time: f64,
+}
 
 fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
     let mut result = vec![0f64; n];
@@ -16,6 +36,8 @@ fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
 }
 
 fn main() {
+    let args = Args::parse();
+
     let universe = mpi::initialize().unwrap();
     let world = universe.world();
 
@@ -27,15 +49,15 @@ fn main() {
 
     // we add zero weight bodies at the end
     // so that all processes get the same amount of bodies
-    let filled_n = ((N_BODIES as f64 / n_proc as f64).ceil() as usize) * n_proc;
+    let filled_n = ((args.n_bodies as f64 / n_proc as f64).ceil() as usize) * n_proc;
 
     let mut masses: Vec<f64> = vec![0f64; filled_n];
     let mut all_positions: Vec<f64> = vec![0f64; filled_n * 2];
 
     // root creates input
     if rank == ROOT_RANK {
-        masses = generate_random_bounded(filled_n, 5e2, 5e3);
-        all_positions = generate_random_bounded(filled_n * 2, -1e1, 1e1);
+        masses = generate_random_bounded(filled_n, 0f64, args.mass_max);
+        all_positions = generate_random_bounded(filled_n * 2, -args.pos_max, args.pos_max);
     }
 
     // if rank == ROOT_RANK {
@@ -45,8 +67,7 @@ fn main() {
     // root sends masses
     root_proc.broadcast_into(&mut masses);
 
-    let n_bodies = masses.len();
-    let bodies_per_proc = n_bodies / n_proc as usize;
+    let bodies_per_proc = filled_n / n_proc as usize;
 
     // root sends initial coordinates to everyone
     root_proc.broadcast_into(&mut all_positions);
@@ -73,7 +94,7 @@ fn main() {
     let mut local_positions =
         all_positions[rank * bodies_per_proc * 2..(rank + 1) * bodies_per_proc * 2].to_vec();
 
-    for t in 0..N_STEPS {
+    for t in 0..args.n_steps {
         // calculate their velocity and positions
         (local_positions, local_velocities) = calculate_next_step(
             &local_velocities,
@@ -81,7 +102,7 @@ fn main() {
             rank,
             &masses,
             &all_positions,
-            TIMESTEPS,
+            args.step_time,
         );
 
         // send new positions with MPI_Allgather
