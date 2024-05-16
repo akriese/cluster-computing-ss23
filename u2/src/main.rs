@@ -28,6 +28,11 @@ struct Args {
     step_time: f64,
 }
 
+/// Generates a float vector of the given length within a given min-max range.
+///
+/// * `n`: Length of the output vector.
+/// * `min`: Minimum of the generated values.
+/// * `max`: Maximum of the generated values.
 fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
     let mut result = vec![0f64; n];
     thread_rng().fill(&mut result[..]);
@@ -36,6 +41,7 @@ fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
 }
 
 fn main() {
+    // parse hyperparameteres; shared between all processes without sending them actively
     let args = Args::parse();
 
     let universe = mpi::initialize().unwrap();
@@ -119,6 +125,14 @@ fn main() {
     }
 }
 
+/// Calculate forces, new velocities and positions for a subset of bodies for one timestep.
+///
+/// * `local_velocities`: Velocities of the bodies to calculate values for.
+/// * `local_positions`: Positions of the bodies to calculate values for.
+/// * `local_offset`: Offset of given package of bodies in the complete array of bodies.
+/// * `masses`: All masses
+/// * `all_positions`: All bodies' positions
+/// * `timestep`: Size of the time step in s
 fn calculate_next_step(
     local_velocities: &Vec<f64>,
     local_positions: &Vec<f64>,
@@ -150,18 +164,37 @@ fn calculate_next_step(
     (new_positions, new_velocities)
 }
 
+/// Calculate the new velocity of a body.
+///
+/// * `old_velocity`: Old velocity
+/// * `force`: Current force on the body
+/// * `mass`: Body's mass
+/// * `timestep`: Step size of the time
 fn calc_velocity(old_velocity: &[f64; 2], force: &[f64; 2], mass: f64, timestep: f64) -> [f64; 2] {
     let [v_x, v_y] = old_velocity;
     let [f_x, f_y] = force;
     return [v_x + f_x / mass * timestep, v_y + f_y / mass * timestep];
 }
 
+/// Calculate the new position of a body.
+///
+/// * `velocity`: New velocity
+/// * `old_position`: Old position
+/// * `timestep`: Time step size
 fn calc_position(velocity: &[f64; 2], old_position: &[f64; 2], timestep: f64) -> [f64; 2] {
     let [v_x, v_y] = velocity;
     let [x, y] = old_position;
     return [x + v_x * timestep, y + v_y * timestep];
 }
 
+/// Calculate the force on one body. This is the trivial approach leading to a running
+/// time of N^2 per step. One could cut that down to N*(N-1)/2 as the handshake lemma can be
+/// applied.
+///
+/// * `self_position`: Position of the body
+/// * `self_mass`: Mass of the body
+/// * `other_positions`: Positions of the other bodies
+/// * `masses`: Masses of the other bodies
 fn calc_force(
     self_position: &[f64; 2],
     self_mass: f64,
@@ -171,12 +204,21 @@ fn calc_force(
     let mut summed_force = [0f64; 2];
     let [self_x, self_y] = self_position;
     for (i, (x, y)) in other_positions.iter().tuples().enumerate() {
+        // distances per axis
         let (d_x, d_y) = (x - self_x, y - self_y);
+
+        // avoid division by zero (e.g. if the body itself is in the array)
         if d_x == 0f64 && d_y == 0f64 {
             continue;
         }
+
+        // euclidean distance
         let r = (d_x * d_x + d_y * d_y).sqrt();
+
+        // Force after Newton's first law
         let f = G * self_mass * masses[i] / (r * r);
+
+        // add directional force to the collective sum
         summed_force[0] += f + d_x / r;
         summed_force[1] += f + d_y / r;
     }
