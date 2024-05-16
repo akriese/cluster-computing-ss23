@@ -85,7 +85,9 @@ fn main() {
     // root sends initial velocity to respective ranks
     let mut local_velocities = vec![0f64; bodies_per_proc * 2];
     if rank == ROOT_RANK {
-        let init_velocities = generate_random_bounded(filled_n * 2, -1e0, 1e0);
+        let mut init_velocities =
+            generate_random_bounded(filled_n * 2, -args.velocity_max, args.velocity_max);
+
         // let init_velocities = vec![0f64; filled_n * 2];
         root_proc.scatter_into_root(&init_velocities, &mut local_velocities);
     } else {
