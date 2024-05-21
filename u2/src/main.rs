@@ -26,6 +26,9 @@ struct Args {
 
     #[arg(short = 'l', default_value_t = 0.1)]
     step_time: f64,
+
+    #[arg(short = 'p', action)]
+    print: bool,
 }
 
 /// Generates a float vector of the given length within a given min-max range.
@@ -66,9 +69,9 @@ fn main() {
         all_positions = generate_random_bounded(filled_n * 2, -args.pos_max, args.pos_max);
     }
 
-    // if rank == ROOT_RANK {
-    //     println!("Masses: {:?}", masses);
-    // }
+    if rank == ROOT_RANK && args.print {
+        println!("Masses: {:?}", masses);
+    }
 
     // root sends masses
     root_proc.broadcast_into(&mut masses);
@@ -78,9 +81,9 @@ fn main() {
     // root sends initial coordinates to everyone
     root_proc.broadcast_into(&mut all_positions);
 
-    // if rank == ROOT_RANK {
-    //     println!("{:?}", all_positions);
-    // }
+    if rank == ROOT_RANK && args.print {
+        println!("{:?}", all_positions);
+    }
 
     // root sends initial velocity to respective ranks
     let mut local_velocities = vec![0f64; bodies_per_proc * 2];
@@ -91,11 +94,6 @@ fn main() {
     } else {
         root_proc.scatter_into(&mut local_velocities);
     }
-
-    // println!(
-    //     "Process {} got initial positions {:?} and initial velocities {:?}",
-    //     rank, all_positions, local_velocities
-    // );
 
     let mut local_positions =
         all_positions[rank * bodies_per_proc * 2..(rank + 1) * bodies_per_proc * 2].to_vec();
@@ -115,9 +113,9 @@ fn main() {
         world.all_gather_into(&local_positions, &mut all_positions);
         world.barrier();
 
-        // if rank == ROOT_RANK {
-        //     println!("{:?}", all_positions);
-        // }
+        if rank == ROOT_RANK && args.print {
+            println!("{:?}", all_positions);
+        }
     }
 
     if rank == ROOT_RANK {
