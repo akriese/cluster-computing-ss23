@@ -85,10 +85,8 @@ fn main() {
     // root sends initial velocity to respective ranks
     let mut local_velocities = vec![0f64; bodies_per_proc * 2];
     if rank == ROOT_RANK {
-        let mut init_velocities =
+        let init_velocities =
             generate_random_bounded(filled_n * 2, -args.velocity_max, args.velocity_max);
-
-        // let init_velocities = vec![0f64; filled_n * 2];
         root_proc.scatter_into_root(&init_velocities, &mut local_velocities);
     } else {
         root_proc.scatter_into(&mut local_velocities);
@@ -102,7 +100,7 @@ fn main() {
     let mut local_positions =
         all_positions[rank * bodies_per_proc * 2..(rank + 1) * bodies_per_proc * 2].to_vec();
 
-    for t in 0..args.n_steps {
+    for _t in 0..args.n_steps {
         // calculate their velocity and positions
         (local_positions, local_velocities) = calculate_next_step(
             &local_velocities,
