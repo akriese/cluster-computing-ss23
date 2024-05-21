@@ -66,6 +66,9 @@ fn main() {
     // root creates input
     if rank == ROOT_RANK {
         masses = generate_random_bounded(filled_n, 0f64, args.mass_max);
+
+        // reset positions of phantom filled bodies
+        masses[args.n_bodies..filled_n].fill(0f64);
         all_positions = generate_random_bounded(filled_n * 2, -args.pos_max, args.pos_max);
     }
 
@@ -90,6 +93,9 @@ fn main() {
     if rank == ROOT_RANK {
         let init_velocities =
             generate_random_bounded(filled_n * 2, -args.velocity_max, args.velocity_max);
+
+        // reset velocities of phantom filled bodies
+        masses[args.n_bodies * 2..filled_n * 2].fill(0f64);
         root_proc.scatter_into_root(&init_velocities, &mut local_velocities);
     } else {
         root_proc.scatter_into(&mut local_velocities);
