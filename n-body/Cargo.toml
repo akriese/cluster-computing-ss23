@@ -1,5 +1,5 @@
 [package]
-name = "u2"
+name = "n-body"
 version = "0.1.0"
 edition = "2021"
 

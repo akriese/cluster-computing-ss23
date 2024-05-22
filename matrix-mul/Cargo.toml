@@ -1,5 +1,5 @@
 [package]
-name = "u1"
+name = "matrix-mul"
 version = "0.1.0"
 edition = "2021"
 
