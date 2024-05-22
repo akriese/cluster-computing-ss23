@@ -10,4 +10,4 @@ mpirun \
   -machinefile Machinefile \
   -mca btl_tcp_if_include eth0 \
   -np $NUM_PROCESSES \
-  ./target/release/u1 $MATRIX_INPUT $STRIDE
+  ./target/release/matrix-mul $MATRIX_INPUT $STRIDE
