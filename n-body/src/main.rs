@@ -31,6 +31,60 @@ struct Args {
     print: bool,
 }
 
+#[derive(Clone, Debug)]
+struct Body {
+    id: usize,
+    mass: f64,
+    position: [f64; 2],
+    // velocity: [f64; 2],
+}
+
+struct TreeNode {
+    center: [f64; 2],
+    mass: f64,
+    force: [f64; 2],
+    children: Vec<TreeNode>,
+    body: Option<Body>,
+}
+
+impl TreeNode {
+    fn insert(&mut self, body: &Body) {
+        match &self.body {
+            Some(b) => {
+                self.split();
+                self.children.push(TreeNode { body: b });
+                self.body = None;
+            }
+            None => {
+                self.body = Some(body.clone());
+            }
+        }
+    }
+
+    fn split(&mut self) {}
+}
+
+fn build_tree(bodies: &[Body]) -> TreeNode {
+    let center = calc_center(bodies);
+    let mut root_node = TreeNode {
+        center,
+        mass: 0f64,
+        force: [0f64; 2],
+        children: vec![],
+        body: None,
+    };
+
+    for body in bodies.iter() {
+        root_node.insert(body);
+    }
+
+    root_node
+}
+
+fn calc_center(bodies: &[Body]) -> [f64; 2] {
+    [0.0, 0.0]
+}
+
 /// Generates a float vector of the given length within a given min-max range.
 ///
 /// * `n`: Length of the output vector.
