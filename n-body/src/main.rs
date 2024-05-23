@@ -36,7 +36,7 @@ struct Body {
     id: usize,
     mass: f64,
     position: [f64; 2],
-    // velocity: [f64; 2],
+    velocity: [f64; 2],
 }
 
 struct TreeNode {
@@ -48,41 +48,73 @@ struct TreeNode {
 }
 
 impl TreeNode {
-    fn insert(&mut self, body: &Body) {
-        match &self.body {
-            Some(b) => {
-                self.split();
-                self.children.push(TreeNode { body: b });
-                self.body = None;
-            }
-            None => {
-                self.body = Some(body.clone());
+    fn from_bodies(bodies: &[Body]) -> TreeNode {
+        let n = bodies.len();
+        match n {
+            0 => TreeNode {
+                center: [0f64, 0f64],
+                mass: 0f64,
+                children: vec![],
+                body: None,
+                force: [0f64, 0f64],
+            },
+            1 => TreeNode {
+                center: bodies[0].position,
+                mass: bodies[0].mass,
+                children: vec![],
+                body: Some(bodies[0].clone()),
+                force: [0f64, 0f64],
+            },
+            _ => {
+                let center = calc_center(bodies);
+                TreeNode {
+                    center,
+                    mass: 0f64,
+                    force: [0f64; 2],
+                    children: vec![
+                        TreeNode::from_bodies(
+                            &bodies
+                                .into_iter()
+                                .filter(|b| {
+                                    b.position[0] >= center[0] && b.position[1] >= center[1]
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>()[..],
+                        ),
+                        TreeNode::from_bodies(
+                            &bodies
+                                .into_iter()
+                                .filter(|b| b.position[0] < center[0] && b.position[1] >= center[1])
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        ),
+                        TreeNode::from_bodies(
+                            &bodies
+                                .into_iter()
+                                .filter(|b| b.position[0] < center[0] && b.position[1] < center[1])
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        ),
+                        TreeNode::from_bodies(
+                            &bodies
+                                .into_iter()
+                                .filter(|b| b.position[0] >= center[0] && b.position[1] < center[1])
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        ),
+                    ],
+                    body: None,
+                }
             }
         }
     }
-
-    fn split(&mut self) {}
-}
-
-fn build_tree(bodies: &[Body]) -> TreeNode {
-    let center = calc_center(bodies);
-    let mut root_node = TreeNode {
-        center,
-        mass: 0f64,
-        force: [0f64; 2],
-        children: vec![],
-        body: None,
-    };
-
-    for body in bodies.iter() {
-        root_node.insert(body);
-    }
-
-    root_node
 }
 
 fn calc_center(bodies: &[Body]) -> [f64; 2] {
-    [0.0, 0.0]
+    let x = bodies.iter().map(|b| b.position[0]).sum::<f64>() / bodies.iter().len() as f64;
+    let y = bodies.iter().map(|b| b.position[1]).sum::<f64>() / bodies.iter().len() as f64;
+
+    return [x, y];
 }
 
 /// Generates a float vector of the given length within a given min-max range.
@@ -95,6 +127,12 @@ fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
     thread_rng().fill(&mut result[..]);
 
     result.iter().map(|x| x * (max - min) + min).collect()
+}
+
+fn get_center_of_mass(root: &TreeNode) {}
+
+fn barnes_hut(root: &TreeNode) {
+    // calculate mass centers from leaves up
 }
 
 fn main() {
@@ -110,20 +148,29 @@ fn main() {
 
     let start_time = mpi::time();
 
-    // we add zero weight bodies at the end
-    // so that all processes get the same amount of bodies
-    let filled_n = ((args.n_bodies as f64 / n_proc as f64).ceil() as usize) * n_proc;
+    let mut masses: Vec<f64> = vec![0f64; args.n_bodies];
+    let mut all_positions: Vec<f64> = vec![0f64; args.n_bodies * 2];
+    let init_velocities: Vec<f64> = vec![0f64; args.n_bodies * 2];
 
-    let mut masses: Vec<f64> = vec![0f64; filled_n];
-    let mut all_positions: Vec<f64> = vec![0f64; filled_n * 2];
+    let mut bodies = vec![];
+    for i in 0..args.n_bodies {
+        bodies.push(Body {
+            id: i,
+            mass: masses[i],
+            position: all_positions[i * 2..(i + 1) * 2].try_into().unwrap(),
+            velocity: init_velocities[i * 2..(i + 1) * 2].try_into().unwrap(),
+        })
+    }
+
+    let tree = TreeNode::from_bodies(&bodies);
+
+    barnes_hut(&tree);
 
     // root creates input
     if rank == ROOT_RANK {
-        masses = generate_random_bounded(filled_n, 0f64, args.mass_max);
+        masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
 
-        // reset positions of phantom filled bodies
-        masses[args.n_bodies..filled_n].fill(0f64);
-        all_positions = generate_random_bounded(filled_n * 2, -args.pos_max, args.pos_max);
+        all_positions = generate_random_bounded(args.n_bodies * 2, -args.pos_max, args.pos_max);
     }
 
     if rank == ROOT_RANK && args.print {
@@ -133,8 +180,6 @@ fn main() {
     // root sends masses
     root_proc.broadcast_into(&mut masses);
 
-    let bodies_per_proc = filled_n / n_proc as usize;
-
     // root sends initial coordinates to everyone
     root_proc.broadcast_into(&mut all_positions);
 
@@ -142,35 +187,19 @@ fn main() {
         println!("{:?}", all_positions);
     }
 
-    // root sends initial velocity to respective ranks
-    let mut local_velocities = vec![0f64; bodies_per_proc * 2];
-    if rank == ROOT_RANK {
-        let mut init_velocities =
-            generate_random_bounded(filled_n * 2, -args.velocity_max, args.velocity_max);
-
-        // reset velocities of phantom filled bodies
-        init_velocities[args.n_bodies..filled_n].fill(0f64);
-        root_proc.scatter_into_root(&init_velocities, &mut local_velocities);
-    } else {
-        root_proc.scatter_into(&mut local_velocities);
-    }
-
-    let mut local_positions =
-        all_positions[rank * bodies_per_proc * 2..(rank + 1) * bodies_per_proc * 2].to_vec();
-
     for _t in 0..args.n_steps {
         // calculate their velocity and positions
-        (local_positions, local_velocities) = calculate_next_step(
-            &local_velocities,
-            &local_positions,
-            rank,
-            &masses,
-            &all_positions,
-            args.step_time,
-        );
+        // (local_positions, local_velocities) = calculate_next_step(
+        //     &local_velocities,
+        //     &local_positions,
+        //     rank,
+        //     &masses,
+        //     &all_positions,
+        //     args.step_time,
+        // );
 
         // send new positions with MPI_Allgather
-        world.all_gather_into(&local_positions, &mut all_positions);
+        // world.all_gather_into(&local_positions, &mut all_positions);
         world.barrier();
 
         if rank == ROOT_RANK && args.print {
