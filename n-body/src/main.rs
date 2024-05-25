@@ -29,9 +29,12 @@ struct Args {
 
     #[arg(short = 'p', action)]
     print: bool,
+
+    #[arg(short = 't', default_value_t = 0.5)]
+    theta: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Equivalence)]
 struct Body {
     id: usize,
     mass: f64,
@@ -39,80 +42,120 @@ struct Body {
     velocity: [f64; 2],
 }
 
+#[derive(Clone, Default, Debug)]
 struct TreeNode {
     center: [f64; 2],
+    size: f64,
     mass: f64,
-    force: [f64; 2],
+    mass_center: [f64; 2],
     children: Vec<TreeNode>,
     body: Option<Body>,
 }
 
 impl TreeNode {
-    fn from_bodies(bodies: &[Body]) -> TreeNode {
-        let n = bodies.len();
-        match n {
-            0 => TreeNode {
-                center: [0f64, 0f64],
-                mass: 0f64,
-                children: vec![],
-                body: None,
-                force: [0f64, 0f64],
-            },
-            1 => TreeNode {
-                center: bodies[0].position,
-                mass: bodies[0].mass,
-                children: vec![],
-                body: Some(bodies[0].clone()),
-                force: [0f64, 0f64],
-            },
-            _ => {
-                let center = calc_center(bodies);
-                TreeNode {
-                    center,
-                    mass: 0f64,
-                    force: [0f64; 2],
-                    children: vec![
-                        TreeNode::from_bodies(
-                            &bodies
-                                .into_iter()
-                                .filter(|b| {
-                                    b.position[0] >= center[0] && b.position[1] >= center[1]
-                                })
-                                .cloned()
-                                .collect::<Vec<_>>()[..],
-                        ),
-                        TreeNode::from_bodies(
-                            &bodies
-                                .into_iter()
-                                .filter(|b| b.position[0] < center[0] && b.position[1] >= center[1])
-                                .cloned()
-                                .collect::<Vec<_>>(),
-                        ),
-                        TreeNode::from_bodies(
-                            &bodies
-                                .into_iter()
-                                .filter(|b| b.position[0] < center[0] && b.position[1] < center[1])
-                                .cloned()
-                                .collect::<Vec<_>>(),
-                        ),
-                        TreeNode::from_bodies(
-                            &bodies
-                                .into_iter()
-                                .filter(|b| b.position[0] >= center[0] && b.position[1] < center[1])
-                                .cloned()
-                                .collect::<Vec<_>>(),
-                        ),
-                    ],
-                    body: None,
-                }
+    fn split(&mut self) {
+        let center_offset = self.size / 4 as f64;
+        let mut dummy = TreeNode::default();
+        dummy.size = self.size / 2 as f64;
+        dummy.center = [
+            self.center[0] + center_offset,
+            self.center[1] + center_offset,
+        ];
+        self.children.push(dummy.clone());
+        dummy.center = [
+            self.center[0] - center_offset,
+            self.center[1] + center_offset,
+        ];
+        self.children.push(dummy.clone());
+        dummy.center = [
+            self.center[0] - center_offset,
+            self.center[1] - center_offset,
+        ];
+        self.children.push(dummy.clone());
+        dummy.center = [
+            self.center[0] + center_offset,
+            self.center[1] - center_offset,
+        ];
+        self.children.push(dummy);
+    }
+
+    fn push_to_child(&mut self, body: Body) {
+        if body.position[0] > self.center[0] {
+            if body.position[1] > self.center[1] {
+                self.children[0].insert(&body);
+            } else {
+                self.children[3].insert(&body);
             }
+        } else {
+            if body.position[1] > self.center[1] {
+                self.children[1].insert(&body);
+            } else {
+                self.children[2].insert(&body);
+            }
+        }
+    }
+
+    fn insert(&mut self, body: &Body) {
+        if let Some(b) = &self.body {
+            let temp = b.clone();
+            self.split();
+            self.push_to_child(temp);
+            self.body = None;
+        } else if self.children.len() == 0 {
+            self.body = Some(body.clone());
+        } else {
+            self.push_to_child(body.clone());
+        }
+
+        self.mass += body.mass;
+        self.mass_center[0] = (self.mass_center[0] * (self.mass - body.mass)
+            + body.position[0] * body.mass)
+            / self.mass;
+        self.mass_center[1] = (self.mass_center[1] * (self.mass - body.mass)
+            + body.position[1] * body.mass)
+            / self.mass;
+    }
+
+    fn calculate_force(&mut self, body: &Body, theta: f64) -> [f64; 2] {
+        let displacement = [
+            self.mass_center[0] - body.position[0],
+            self.mass_center[1] - body.position[1],
+        ];
+        let distance =
+            (displacement[0] * displacement[0] + displacement[1] * displacement[1]).sqrt();
+
+        if let Some(b) = &self.body {
+            let f = G * b.mass * body.mass / (distance * distance);
+            return [
+                f + displacement[0] / distance,
+                f + displacement[1] / distance,
+            ];
+        } else if self.children.len() > 0 {
+            if self.size / distance < theta {
+                let f = G * self.mass * body.mass / (distance * distance);
+                return [
+                    f + displacement[0] / distance,
+                    f + displacement[1] / distance,
+                ];
+            } else {
+                let mut summed_force = [f64::default(); 2];
+                for child in self.children.iter_mut() {
+                    let f = child.calculate_force(body, theta);
+                    summed_force[0] += f[0];
+                    summed_force[1] += f[1];
+                }
+                return summed_force;
+            }
+        } else {
+            // empty quadrant
+            return [0f64; 2];
         }
     }
 }
 
 fn calc_center(bodies: &[Body]) -> [f64; 2] {
-    let x = bodies.iter().map(|b| b.position[0]).sum::<f64>() / bodies.iter().len() as f64;
-    let y = bodies.iter().map(|b| b.position[1]).sum::<f64>() / bodies.iter().len() as f64;
+    let x = bodies.iter().map(|b| b.position[0]).sum::<f64>() / bodies.len() as f64;
+    let y = bodies.iter().map(|b| b.position[1]).sum::<f64>() / bodies.len() as f64;
 
     return [x, y];
 }
@@ -129,10 +172,57 @@ fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
     result.iter().map(|x| x * (max - min) + min).collect()
 }
 
-fn get_center_of_mass(root: &TreeNode) {}
+fn get_size(positions: &[[f64; 2]]) -> f64 {
+    f64::max(
+        positions
+            .iter()
+            .map(|p| p[0])
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+            - positions
+                .iter()
+                .map(|p| p[0])
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap(),
+        positions
+            .iter()
+            .map(|p| p[1])
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+            - positions
+                .iter()
+                .map(|p| p[1])
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap(),
+    )
+}
 
-fn barnes_hut(root: &TreeNode) {
-    // calculate mass centers from leaves up
+fn barnes_hut(bodies: &mut Vec<Body>, timestep: f64, theta: f64) {
+    // build the tree
+    let mut tree = TreeNode::default();
+    tree.center = calc_center(&bodies);
+
+    tree.size = get_size(&bodies.iter().map(|b| b.position).collect::<Vec<[f64; 2]>>());
+
+    for body in &mut *bodies {
+        tree.insert(&body);
+    }
+
+    // calculate forces
+    let mut forces = vec![[f64::default(); 2]; bodies.len()];
+    for (i, body) in bodies.iter().enumerate() {
+        forces[i] = tree.calculate_force(body, theta);
+    }
+
+    // calculate velocity change
+    for (i, body) in bodies.iter_mut().enumerate() {
+        body.velocity = calc_velocity(&body.velocity, &forces[i], body.mass, timestep);
+    }
+
+    // calculate new positions
+    for body in bodies.iter_mut() {
+        body.velocity = calc_position(&body.velocity, &body.position, timestep);
+    }
 }
 
 fn main() {
@@ -150,7 +240,15 @@ fn main() {
 
     let mut masses: Vec<f64> = vec![0f64; args.n_bodies];
     let mut all_positions: Vec<f64> = vec![0f64; args.n_bodies * 2];
-    let init_velocities: Vec<f64> = vec![0f64; args.n_bodies * 2];
+    let mut init_velocities: Vec<f64> = vec![0f64; args.n_bodies * 2];
+
+    // root creates input
+    if rank == ROOT_RANK {
+        masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
+        all_positions = generate_random_bounded(args.n_bodies * 2, -args.pos_max, args.pos_max);
+        init_velocities =
+            generate_random_bounded(args.n_bodies * 2, -args.velocity_max, args.velocity_max);
+    }
 
     let mut bodies = vec![];
     for i in 0..args.n_bodies {
@@ -162,49 +260,8 @@ fn main() {
         })
     }
 
-    let tree = TreeNode::from_bodies(&bodies);
-
-    barnes_hut(&tree);
-
-    // root creates input
-    if rank == ROOT_RANK {
-        masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
-
-        all_positions = generate_random_bounded(args.n_bodies * 2, -args.pos_max, args.pos_max);
-    }
-
-    if rank == ROOT_RANK && args.print {
-        println!("Masses: {:?}", masses);
-    }
-
-    // root sends masses
-    root_proc.broadcast_into(&mut masses);
-
-    // root sends initial coordinates to everyone
-    root_proc.broadcast_into(&mut all_positions);
-
-    if rank == ROOT_RANK && args.print {
-        println!("{:?}", all_positions);
-    }
-
-    for _t in 0..args.n_steps {
-        // calculate their velocity and positions
-        // (local_positions, local_velocities) = calculate_next_step(
-        //     &local_velocities,
-        //     &local_positions,
-        //     rank,
-        //     &masses,
-        //     &all_positions,
-        //     args.step_time,
-        // );
-
-        // send new positions with MPI_Allgather
-        // world.all_gather_into(&local_positions, &mut all_positions);
-        world.barrier();
-
-        if rank == ROOT_RANK && args.print {
-            println!("{:?}", all_positions);
-        }
+    for step in 0..args.n_steps {
+        barnes_hut(&mut bodies, args.step_time, args.theta);
     }
 
     if rank == ROOT_RANK {
