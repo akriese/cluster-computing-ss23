@@ -160,6 +160,57 @@ impl TreeNode {
             return [0f64; 2];
         }
     }
+
+    fn merge(&mut self, mut other: TreeNode) {
+        // this assumes that two trees with the same size and center get merged
+        assert!(self.size == other.size);
+        assert!(self.center == other.center);
+
+        if let Some(body) = &self.body {
+            // 1. case: self is single body
+            other.insert(body);
+            *self = other;
+        } else if self.children.len() == 0 {
+            // 2. case: self is empty
+            *self = other;
+        } else {
+            // 3. case: self has children
+            // needs to handle three cases for other
+            if let Some(b) = &other.body {
+                self.insert(b);
+            } else if other.children.len() == 0 {
+                // empty case, other is empty quadrant and nothing to do here...
+            } else {
+                for (self_child, other_child) in
+                    self.children.iter_mut().zip(other.children.into_iter())
+                {
+                    self_child.merge(other_child);
+                }
+
+                self.mass = self.children.iter().map(|c| c.mass).sum();
+                self.mass_center[0] = self
+                    .children
+                    .iter()
+                    .map(|c| c.mass_center[0] * c.mass)
+                    .sum::<f64>()
+                    / self.mass;
+                self.mass_center[1] = self
+                    .children
+                    .iter()
+                    .map(|c| c.mass_center[1] * c.mass)
+                    .sum::<f64>()
+                    / self.mass;
+            }
+        }
+    }
+
+    fn height(&self) -> usize {
+        return if self.children.len() == 0 {
+            1
+        } else {
+            1 + self.children.iter().map(|c| c.height()).max().unwrap()
+        };
+    }
 }
 
 fn calc_center(bodies: &[Body]) -> [f64; 2] {
@@ -206,35 +257,34 @@ fn get_size(positions: &[[f64; 2]]) -> f64 {
     )
 }
 
-fn barnes_hut(world: &SimpleCommunicator, timestep: f64, theta: f64, local_bodies: &mut Vec<Body>) {
+fn barnes_hut(
+    world: &SimpleCommunicator,
+    timestep: f64,
+    theta: f64,
+    local_bodies: &mut Vec<Body>,
+    root: &mut TreeNode,
+) {
+    let root_copy = root.clone();
     let mut start_time = mpi::time();
     let mut current_time;
 
-    // build the tree
-    let mut tree = TreeNode::default();
-    tree.center = calc_center(&local_bodies);
-    tree.size = get_size(
-        &local_bodies
-            .iter()
-            .map(|b| b.position)
-            .collect::<Vec<[f64; 2]>>(),
-    );
-
     for body in local_bodies.iter() {
         if body.mass > 0f64 {
-            tree.insert(&body);
+            root.insert(&body);
         }
     }
 
-    current_time = mpi::time();
-    println!(
-        "Tree built! time since step started: {} sec",
-        current_time - start_time
-    );
-    start_time = current_time;
+    if world.rank() == 0 as i32 {
+        current_time = mpi::time();
+        println!(
+            "Tree built! time since step started: {} sec",
+            current_time - start_time
+        );
+        start_time = current_time;
+    }
 
     // serialize own tree
-    let serialized = bitcode::serialize(&tree).unwrap();
+    let serialized = bitcode::serialize(&root).unwrap();
 
     // send length of serialization to all processes
     let mut serialized_lengths = vec![0i32; world.size() as usize];
@@ -263,6 +313,13 @@ fn barnes_hut(world: &SimpleCommunicator, timestep: f64, theta: f64, local_bodie
         .iter()
         .enumerate()
         .map(|(i, offset)| {
+            if i == world.rank() as usize {
+                // just take empty tree here, to skip deserialization of the
+                // tree that was created by the process itself.
+                // Later, all trees will be merged into the process-local root.
+                return root_copy.clone();
+            }
+
             let end_offset = if i == world.size() as usize - 1 {
                 total_serialized_length
             } else {
@@ -273,12 +330,29 @@ fn barnes_hut(world: &SimpleCommunicator, timestep: f64, theta: f64, local_bodie
         })
         .collect::<Vec<TreeNode>>();
 
-    current_time = mpi::time();
-    println!(
-        "All trees shared and parsed! time since step started: {} sec",
-        current_time - start_time
-    );
-    start_time = current_time;
+    if world.rank() == 0 as i32 {
+        current_time = mpi::time();
+        println!(
+            "All trees shared and parsed! time since step started: {} sec",
+            current_time - start_time
+        );
+        start_time = current_time;
+    }
+
+    // merge all parsed trees into the local root tree, consuming the parsed trees
+    for tree in all_trees {
+        root.merge(tree);
+    }
+
+    if world.rank() == 0 as i32 {
+        current_time = mpi::time();
+        println!(
+            "Trees merged! (Height: {}) time since step started: {} sec",
+            root.height(),
+            current_time - start_time
+        );
+        start_time = current_time;
+    }
 
     // calculate forces, velocity and positions for given range
     for b in local_bodies {
@@ -286,21 +360,18 @@ fn barnes_hut(world: &SimpleCommunicator, timestep: f64, theta: f64, local_bodie
             continue;
         }
 
-        let mut summed_force = [0f64; 2];
-        for t in all_trees.iter() {
-            let f = t.calculate_force(b, theta);
-            summed_force[0] += f[0];
-            summed_force[1] += f[1];
-        }
-        b.velocity = calc_velocity(&b.velocity, &summed_force, b.mass, timestep);
+        let f = root.calculate_force(b, theta);
+        b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
         b.position = calc_position(&b.velocity, &b.position, timestep);
     }
 
-    current_time = mpi::time();
-    println!(
-        "Forces calculated! time since step started: {} sec",
-        current_time - start_time
-    );
+    if world.rank() == 0 as i32 {
+        current_time = mpi::time();
+        println!(
+            "Forces calculated! time since step started: {} sec",
+            current_time - start_time
+        );
+    }
 }
 
 fn main() {
@@ -353,7 +424,23 @@ fn main() {
     let mut local_bodies: Vec<Body> = all_bodies[local_range.clone()].into();
 
     for step in 0..args.n_steps {
-        barnes_hut(&world, args.step_time, args.theta, &mut local_bodies);
+        // initial tree root
+        let mut tree = TreeNode::default();
+        tree.center = calc_center(&all_bodies);
+        tree.size = get_size(
+            &all_bodies
+                .iter()
+                .map(|b| b.position)
+                .collect::<Vec<[f64; 2]>>(),
+        );
+
+        barnes_hut(
+            &world,
+            args.step_time,
+            args.theta,
+            &mut local_bodies,
+            &mut tree,
+        );
 
         // all gather to share updated bodies
         world.all_gather_into(&local_bodies, &mut all_bodies);
