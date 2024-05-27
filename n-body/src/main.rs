@@ -207,6 +207,9 @@ fn get_size(positions: &[[f64; 2]]) -> f64 {
 }
 
 fn barnes_hut(world: &SimpleCommunicator, timestep: f64, theta: f64, local_bodies: &mut Vec<Body>) {
+    let mut start_time = mpi::time();
+    let mut current_time;
+
     // build the tree
     let mut tree = TreeNode::default();
     tree.center = calc_center(&local_bodies);
@@ -222,6 +225,13 @@ fn barnes_hut(world: &SimpleCommunicator, timestep: f64, theta: f64, local_bodie
             tree.insert(&body);
         }
     }
+
+    current_time = mpi::time();
+    println!(
+        "Tree built! time since step started: {} sec",
+        current_time - start_time
+    );
+    start_time = current_time;
 
     // serialize own tree
     let serialized = bitcode::serialize(&tree).unwrap();
@@ -263,6 +273,13 @@ fn barnes_hut(world: &SimpleCommunicator, timestep: f64, theta: f64, local_bodie
         })
         .collect::<Vec<TreeNode>>();
 
+    current_time = mpi::time();
+    println!(
+        "All trees shared and parsed! time since step started: {} sec",
+        current_time - start_time
+    );
+    start_time = current_time;
+
     // calculate forces, velocity and positions for given range
     for b in local_bodies {
         if b.mass == 0f64 {
@@ -278,6 +295,12 @@ fn barnes_hut(world: &SimpleCommunicator, timestep: f64, theta: f64, local_bodie
         b.velocity = calc_velocity(&b.velocity, &summed_force, b.mass, timestep);
         b.position = calc_position(&b.velocity, &b.position, timestep);
     }
+
+    current_time = mpi::time();
+    println!(
+        "Forces calculated! time since step started: {} sec",
+        current_time - start_time
+    );
 }
 
 fn main() {
