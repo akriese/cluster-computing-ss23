@@ -80,7 +80,11 @@ impl TreeNode {
         self.children.push(dummy);
     }
 
-    fn push_to_child(&mut self, body: Body) {
+    fn push_to_child(&mut self, body: &Body) {
+        if self.children.len() == 0 {
+            self.split();
+        }
+
         if body.position[0] > self.center[0] {
             if body.position[1] > self.center[1] {
                 self.children[0].insert(&body);
@@ -98,14 +102,12 @@ impl TreeNode {
 
     fn insert(&mut self, body: &Body) {
         if let Some(b) = &self.body {
-            let temp = b.clone();
-            self.split();
-            self.push_to_child(temp);
+            self.push_to_child(&b.clone());
             self.body = None;
         } else if self.children.len() == 0 {
             self.body = Some(body.clone());
         } else {
-            self.push_to_child(body.clone());
+            self.push_to_child(body);
         }
 
         self.mass += body.mass;
@@ -210,11 +212,17 @@ fn barnes_hut(bodies: &Vec<Body>, timestep: f64, theta: f64, local_bodies: &mut 
     tree.size = get_size(&bodies.iter().map(|b| b.position).collect::<Vec<[f64; 2]>>());
 
     for body in bodies {
-        tree.insert(&body);
+        if body.mass > 0f64 {
+            tree.insert(&body);
+        }
     }
 
     // calculate forces, velocity and positions for given range
     for b in local_bodies {
+        if b.mass == 0f64 {
+            continue;
+        }
+
         let f = tree.calculate_force(b, theta);
         b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
         b.position = calc_position(&b.velocity, &b.position, timestep);
