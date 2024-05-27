@@ -1,8 +1,9 @@
 use std::iter::repeat;
 
 use clap::Parser;
-use mpi::traits::*;
+use mpi::{datatype::PartitionMut, topology::SimpleCommunicator, traits::*};
 use rand::{thread_rng, Rng};
+use serde::{Deserialize, Serialize};
 
 const ROOT_RANK: usize = 0;
 const G: f64 = 6.67e-11f64;
@@ -35,7 +36,7 @@ struct Args {
     theta: f64,
 }
 
-#[derive(Clone, Debug, Equivalence, Default)]
+#[derive(Clone, Debug, Equivalence, Default, Deserialize, Serialize)]
 struct Body {
     id: usize,
     mass: f64,
@@ -43,7 +44,7 @@ struct Body {
     velocity: [f64; 2],
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Deserialize, Serialize)]
 struct TreeNode {
     center: [f64; 2],
     size: f64,
@@ -119,7 +120,7 @@ impl TreeNode {
             / self.mass;
     }
 
-    fn calculate_force(&mut self, body: &Body, theta: f64) -> [f64; 2] {
+    fn calculate_force(&self, body: &Body, theta: f64) -> [f64; 2] {
         let displacement = [
             self.mass_center[0] - body.position[0],
             self.mass_center[1] - body.position[1],
@@ -146,7 +147,7 @@ impl TreeNode {
                 ];
             } else {
                 let mut summed_force = [f64::default(); 2];
-                for child in self.children.iter_mut() {
+                for child in self.children.iter() {
                     let f = child.calculate_force(body, theta);
                     summed_force[0] += f[0];
                     summed_force[1] += f[1];
@@ -205,17 +206,62 @@ fn get_size(positions: &[[f64; 2]]) -> f64 {
     )
 }
 
-fn barnes_hut(bodies: &Vec<Body>, timestep: f64, theta: f64, local_bodies: &mut Vec<Body>) {
+fn barnes_hut(world: &SimpleCommunicator, timestep: f64, theta: f64, local_bodies: &mut Vec<Body>) {
     // build the tree
     let mut tree = TreeNode::default();
-    tree.center = calc_center(&bodies);
-    tree.size = get_size(&bodies.iter().map(|b| b.position).collect::<Vec<[f64; 2]>>());
+    tree.center = calc_center(&local_bodies);
+    tree.size = get_size(
+        &local_bodies
+            .iter()
+            .map(|b| b.position)
+            .collect::<Vec<[f64; 2]>>(),
+    );
 
-    for body in bodies {
+    for body in local_bodies.iter() {
         if body.mass > 0f64 {
             tree.insert(&body);
         }
     }
+
+    // serialize own tree
+    let serialized = bitcode::serialize(&tree).unwrap();
+
+    // send length of serialization to all processes
+    let mut serialized_lengths = vec![0i32; world.size() as usize];
+    world.all_gather_into(&(serialized.len() as i32), &mut serialized_lengths);
+
+    if world.rank() == 0 as i32 {
+        println!("Serialized lengths: {:?}", serialized_lengths);
+    }
+
+    // root gathers all serialized trees
+    let total_serialized_length = serialized_lengths.iter().sum::<i32>() as usize;
+    let mut all_trees_buf = vec![0u8; total_serialized_length];
+    let offsets: Vec<i32> = serialized_lengths
+        .iter()
+        .scan(0, |acc, &x| {
+            let tmp = *acc;
+            *acc += x;
+            Some(tmp)
+        })
+        .collect();
+    let mut partition = PartitionMut::new(&mut all_trees_buf[..], serialized_lengths, &offsets[..]);
+    world.all_gather_varcount_into(&serialized, &mut partition);
+
+    // each process deserializes all trees
+    let all_trees = offsets
+        .iter()
+        .enumerate()
+        .map(|(i, offset)| {
+            let end_offset = if i == world.size() as usize - 1 {
+                total_serialized_length
+            } else {
+                offsets[i + 1] as usize
+            };
+            bitcode::deserialize::<TreeNode>(&mut all_trees_buf[*offset as usize..end_offset])
+                .unwrap()
+        })
+        .collect::<Vec<TreeNode>>();
 
     // calculate forces, velocity and positions for given range
     for b in local_bodies {
@@ -223,8 +269,13 @@ fn barnes_hut(bodies: &Vec<Body>, timestep: f64, theta: f64, local_bodies: &mut 
             continue;
         }
 
-        let f = tree.calculate_force(b, theta);
-        b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
+        let mut summed_force = [0f64; 2];
+        for t in all_trees.iter() {
+            let f = t.calculate_force(b, theta);
+            summed_force[0] += f[0];
+            summed_force[1] += f[1];
+        }
+        b.velocity = calc_velocity(&b.velocity, &summed_force, b.mass, timestep);
         b.position = calc_position(&b.velocity, &b.position, timestep);
     }
 }
@@ -279,7 +330,7 @@ fn main() {
     let mut local_bodies: Vec<Body> = all_bodies[local_range.clone()].into();
 
     for step in 0..args.n_steps {
-        barnes_hut(&all_bodies, args.step_time, args.theta, &mut local_bodies);
+        barnes_hut(&world, args.step_time, args.theta, &mut local_bodies);
 
         // all gather to share updated bodies
         world.all_gather_into(&local_bodies, &mut all_bodies);
