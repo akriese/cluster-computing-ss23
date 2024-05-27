@@ -1,5 +1,6 @@
+use std::iter::repeat;
+
 use clap::Parser;
-use itertools::Itertools;
 use mpi::traits::*;
 use rand::{thread_rng, Rng};
 
@@ -34,7 +35,7 @@ struct Args {
     theta: f64,
 }
 
-#[derive(Clone, Debug, Equivalence)]
+#[derive(Clone, Debug, Equivalence, Default)]
 struct Body {
     id: usize,
     mass: f64,
@@ -124,6 +125,10 @@ impl TreeNode {
         let distance =
             (displacement[0] * displacement[0] + displacement[1] * displacement[1]).sqrt();
 
+        if distance == 0.0 {
+            return [0f64; 2];
+        }
+
         if let Some(b) = &self.body {
             let f = G * b.mass * body.mass / (distance * distance);
             return [
@@ -144,6 +149,7 @@ impl TreeNode {
                     summed_force[0] += f[0];
                     summed_force[1] += f[1];
                 }
+
                 return summed_force;
             }
         } else {
@@ -197,31 +203,21 @@ fn get_size(positions: &[[f64; 2]]) -> f64 {
     )
 }
 
-fn barnes_hut(bodies: &mut Vec<Body>, timestep: f64, theta: f64) {
+fn barnes_hut(bodies: &Vec<Body>, timestep: f64, theta: f64, local_bodies: &mut Vec<Body>) {
     // build the tree
     let mut tree = TreeNode::default();
     tree.center = calc_center(&bodies);
-
     tree.size = get_size(&bodies.iter().map(|b| b.position).collect::<Vec<[f64; 2]>>());
 
-    for body in &mut *bodies {
+    for body in bodies {
         tree.insert(&body);
     }
 
-    // calculate forces
-    let mut forces = vec![[f64::default(); 2]; bodies.len()];
-    for (i, body) in bodies.iter().enumerate() {
-        forces[i] = tree.calculate_force(body, theta);
-    }
-
-    // calculate velocity change
-    for (i, body) in bodies.iter_mut().enumerate() {
-        body.velocity = calc_velocity(&body.velocity, &forces[i], body.mass, timestep);
-    }
-
-    // calculate new positions
-    for body in bodies.iter_mut() {
-        body.velocity = calc_position(&body.velocity, &body.position, timestep);
+    // calculate forces, velocity and positions for given range
+    for b in local_bodies {
+        let f = tree.calculate_force(b, theta);
+        b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
+        b.position = calc_position(&b.velocity, &b.position, timestep);
     }
 }
 
@@ -238,74 +234,52 @@ fn main() {
 
     let start_time = mpi::time();
 
-    let mut masses: Vec<f64> = vec![0f64; args.n_bodies];
-    let mut all_positions: Vec<f64> = vec![0f64; args.n_bodies * 2];
-    let mut init_velocities: Vec<f64> = vec![0f64; args.n_bodies * 2];
+    // we add zero weight bodies at the end
+    // so that all processes get the same amount of bodies
+    let bodies_per_proc = (args.n_bodies as f64 / n_proc as f64).ceil() as usize;
+    let filled_n = bodies_per_proc * n_proc;
+    let extra_n = filled_n - args.n_bodies;
+
+    let mut all_bodies = vec![Body::default(); filled_n];
 
     // root creates input
     if rank == ROOT_RANK {
-        masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
-        all_positions = generate_random_bounded(args.n_bodies * 2, -args.pos_max, args.pos_max);
-        init_velocities =
+        let mut masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
+        masses.extend(repeat(0f64).take(extra_n));
+
+        let mut all_positions =
+            generate_random_bounded(args.n_bodies * 2, -args.pos_max, args.pos_max);
+        all_positions.extend(repeat(0f64).take(extra_n * 2));
+
+        let mut init_velocities =
             generate_random_bounded(args.n_bodies * 2, -args.velocity_max, args.velocity_max);
+        init_velocities.extend(repeat(0f64).take(extra_n * 2));
+
+        for i in 0..filled_n {
+            let b = &mut all_bodies[i];
+            b.id = i;
+            b.mass = masses[i];
+            b.position = all_positions[i * 2..(i + 1) * 2].try_into().unwrap();
+            b.velocity = init_velocities[i * 2..(i + 1) * 2].try_into().unwrap();
+        }
     }
 
-    let mut bodies = vec![];
-    for i in 0..args.n_bodies {
-        bodies.push(Body {
-            id: i,
-            mass: masses[i],
-            position: all_positions[i * 2..(i + 1) * 2].try_into().unwrap(),
-            velocity: init_velocities[i * 2..(i + 1) * 2].try_into().unwrap(),
-        })
-    }
+    // share all bodies with other processes
+    root_proc.broadcast_into(&mut all_bodies);
+
+    let local_range = rank * bodies_per_proc..(rank + 1) * bodies_per_proc;
+    let mut local_bodies: Vec<Body> = all_bodies[local_range.clone()].into();
 
     for step in 0..args.n_steps {
-        barnes_hut(&mut bodies, args.step_time, args.theta);
+        barnes_hut(&all_bodies, args.step_time, args.theta, &mut local_bodies);
+
+        // all gather to share updated bodies
+        world.all_gather_into(&local_bodies, &mut all_bodies);
     }
 
     if rank == ROOT_RANK {
         println!("It took {} seconds!", mpi::time() - start_time);
     }
-}
-
-/// Calculate forces, new velocities and positions for a subset of bodies for one timestep.
-///
-/// * `local_velocities`: Velocities of the bodies to calculate values for.
-/// * `local_positions`: Positions of the bodies to calculate values for.
-/// * `local_offset`: Offset of given package of bodies in the complete array of bodies.
-/// * `masses`: All masses
-/// * `all_positions`: All bodies' positions
-/// * `timestep`: Size of the time step in s
-fn calculate_next_step(
-    local_velocities: &Vec<f64>,
-    local_positions: &Vec<f64>,
-    local_offset: usize,
-    masses: &Vec<f64>,
-    all_positions: &Vec<f64>,
-    timestep: f64,
-) -> (Vec<f64>, Vec<f64>) {
-    let n = local_positions.len();
-
-    assert!(n % 2 == 0);
-
-    let mut new_velocities = vec![0f64; n];
-    let mut new_positions = vec![0f64; n];
-
-    for i in 0..n / 2 {
-        let range = i * 2..(i + 1) * 2;
-        let p: &[f64; 2] = &local_positions[range.clone()].try_into().unwrap();
-        let v: &[f64; 2] = &local_velocities[range.clone()].try_into().unwrap();
-        let m = masses[local_offset + i];
-        let f = calc_force(p, m, all_positions, masses);
-        let new_v = calc_velocity(v, &f, m, timestep);
-        let new_p = calc_position(&new_v, p, timestep);
-
-        new_velocities[range.clone()].copy_from_slice(&new_v);
-        new_positions[range.clone()].copy_from_slice(&new_p);
-    }
-
-    (new_positions, new_velocities)
 }
 
 /// Calculate the new velocity of a body.
@@ -329,43 +303,4 @@ fn calc_position(velocity: &[f64; 2], old_position: &[f64; 2], timestep: f64) ->
     let [v_x, v_y] = velocity;
     let [x, y] = old_position;
     return [x + v_x * timestep, y + v_y * timestep];
-}
-
-/// Calculate the force on one body. This is the trivial approach leading to a running
-/// time of N^2 per step. One could cut that down to N*(N-1)/2 as the handshake lemma can be
-/// applied.
-///
-/// * `self_position`: Position of the body
-/// * `self_mass`: Mass of the body
-/// * `other_positions`: Positions of the other bodies
-/// * `masses`: Masses of the other bodies
-fn calc_force(
-    self_position: &[f64; 2],
-    self_mass: f64,
-    other_positions: &Vec<f64>,
-    masses: &Vec<f64>,
-) -> [f64; 2] {
-    let mut summed_force = [0f64; 2];
-    let [self_x, self_y] = self_position;
-    for (i, (x, y)) in other_positions.iter().tuples().enumerate() {
-        // distances per axis
-        let (d_x, d_y) = (x - self_x, y - self_y);
-
-        // avoid division by zero (e.g. if the body itself is in the array)
-        if d_x == 0f64 && d_y == 0f64 {
-            continue;
-        }
-
-        // euclidean distance
-        let r = (d_x * d_x + d_y * d_y).sqrt();
-
-        // Force after Newton's first law
-        let f = G * self_mass * masses[i] / (r * r);
-
-        // add directional force to the collective sum
-        summed_force[0] += f + d_x / r;
-        summed_force[1] += f + d_y / r;
-    }
-
-    return summed_force;
 }
