@@ -206,6 +206,9 @@ fn get_size(positions: &[[f64; 2]]) -> f64 {
 }
 
 fn barnes_hut(bodies: &Vec<Body>, timestep: f64, theta: f64, local_bodies: &mut Vec<Body>) {
+    let mut start_time = mpi::time();
+    let mut current_time;
+
     // build the tree
     let mut tree = TreeNode::default();
     tree.center = calc_center(&bodies);
@@ -217,6 +220,10 @@ fn barnes_hut(bodies: &Vec<Body>, timestep: f64, theta: f64, local_bodies: &mut 
         }
     }
 
+    current_time = mpi::time();
+    println!("Tree built! took {} sec", current_time - start_time);
+    start_time = current_time;
+
     // calculate forces, velocity and positions for given range
     for b in local_bodies {
         if b.mass == 0f64 {
@@ -227,6 +234,9 @@ fn barnes_hut(bodies: &Vec<Body>, timestep: f64, theta: f64, local_bodies: &mut 
         b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
         b.position = calc_position(&b.velocity, &b.position, timestep);
     }
+
+    current_time = mpi::time();
+    println!("Forces calculated! took {} sec", current_time - start_time);
 }
 
 fn main() {
