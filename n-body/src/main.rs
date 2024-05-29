@@ -55,9 +55,11 @@ struct TreeNode {
 
 impl TreeNode {
     fn split(&mut self) {
-        let center_offset = self.size / 4 as f64;
-        let mut dummy = TreeNode::default();
-        dummy.size = self.size / 2 as f64;
+        let center_offset = self.size / 4_f64;
+        let mut dummy = TreeNode {
+            size: self.size / 2_f64,
+            ..Default::default()
+        };
         dummy.center = [
             self.center[0] + center_offset,
             self.center[1] + center_offset,
@@ -81,22 +83,20 @@ impl TreeNode {
     }
 
     fn push_to_child(&mut self, body: &Body) {
-        if self.children.len() == 0 {
+        if self.children.is_empty() {
             self.split();
         }
 
         if body.position[0] > self.center[0] {
             if body.position[1] > self.center[1] {
-                self.children[0].insert(&body);
+                self.children[0].insert(body);
             } else {
-                self.children[3].insert(&body);
+                self.children[3].insert(body);
             }
+        } else if body.position[1] > self.center[1] {
+            self.children[1].insert(body);
         } else {
-            if body.position[1] > self.center[1] {
-                self.children[1].insert(&body);
-            } else {
-                self.children[2].insert(&body);
-            }
+            self.children[2].insert(body);
         }
     }
 
@@ -135,17 +135,17 @@ impl TreeNode {
 
         if let Some(b) = &self.body {
             let f = G * b.mass * body.mass / (distance * distance);
-            return [
+            [
                 f + displacement[0] / distance,
                 f + displacement[1] / distance,
-            ];
-        } else if self.children.len() > 0 {
+            ]
+        } else if !self.children.is_empty() {
             if self.size / distance < theta {
                 let f = G * self.mass * body.mass / (distance * distance);
-                return [
+                [
                     f + displacement[0] / distance,
                     f + displacement[1] / distance,
-                ];
+                ]
             } else {
                 let mut summed_force = [f64::default(); 2];
                 for child in self.children.iter_mut() {
@@ -154,11 +154,11 @@ impl TreeNode {
                     summed_force[1] += f[1];
                 }
 
-                return summed_force;
+                summed_force
             }
         } else {
             // empty quadrant
-            return [0f64; 2];
+            [0f64; 2]
         }
     }
 }
@@ -167,7 +167,7 @@ fn calc_center(bodies: &[Body]) -> [f64; 2] {
     let x = bodies.iter().map(|b| b.position[0]).sum::<f64>() / bodies.len() as f64;
     let y = bodies.iter().map(|b| b.position[1]).sum::<f64>() / bodies.len() as f64;
 
-    return [x, y];
+    [x, y]
 }
 
 /// Generates a float vector of the given length within a given min-max range.
@@ -311,7 +311,7 @@ fn main() {
 fn calc_velocity(old_velocity: &[f64; 2], force: &[f64; 2], mass: f64, timestep: f64) -> [f64; 2] {
     let [v_x, v_y] = old_velocity;
     let [f_x, f_y] = force;
-    return [v_x + f_x / mass * timestep, v_y + f_y / mass * timestep];
+    [v_x + f_x / mass * timestep, v_y + f_y / mass * timestep]
 }
 
 /// Calculate the new position of a body.
@@ -322,5 +322,5 @@ fn calc_velocity(old_velocity: &[f64; 2], force: &[f64; 2], mass: f64, timestep:
 fn calc_position(velocity: &[f64; 2], old_position: &[f64; 2], timestep: f64) -> [f64; 2] {
     let [v_x, v_y] = velocity;
     let [x, y] = old_position;
-    return [x + v_x * timestep, y + v_y * timestep];
+    [x + v_x * timestep, y + v_y * timestep]
 }
