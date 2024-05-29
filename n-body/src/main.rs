@@ -102,12 +102,14 @@ impl TreeNode {
     }
 
     fn insert(&mut self, body: &Body) {
-        if let Some(b) = &self.body {
-            self.push_to_child(&b.clone());
-            self.body = None;
-        } else if self.children.len() == 0 {
+        if self.children.is_empty() && self.body.is_none() {
             self.body = Some(body.clone());
         } else {
+            if let Some(b) = &self.body {
+                self.push_to_child(&b.clone());
+                self.body = None;
+            }
+
             self.push_to_child(body);
         }
 
