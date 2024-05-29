@@ -130,7 +130,7 @@ impl TreeNode {
         let distance =
             (displacement[0] * displacement[0] + displacement[1] * displacement[1]).sqrt();
 
-        if distance == 0.0 {
+        if distance < 1e-10f64 {
             return [0f64; 2];
         }
 
