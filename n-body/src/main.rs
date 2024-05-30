@@ -1,9 +1,13 @@
-use std::iter::repeat;
+mod tree;
 
 use clap::Parser;
-use mpi::{datatype::PartitionMut, topology::SimpleCommunicator, traits::*};
+use mpi::datatype::PartitionMut;
+use mpi::topology::SimpleCommunicator;
+use mpi::traits::*;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
+use std::iter::repeat;
+use tree::TreeNode;
 
 const ROOT_RANK: usize = 0;
 const G: f64 = 6.67e-11f64;
@@ -44,177 +48,9 @@ struct Body {
     velocity: [f64; 2],
 }
 
-#[derive(Clone, Default, Debug, Deserialize, Serialize)]
-struct TreeNode {
-    center: [f64; 2],
-    size: f64,
-    mass: f64,
-    mass_center: [f64; 2],
-    children: Vec<TreeNode>,
-    body: Option<Body>,
-}
-
-impl TreeNode {
-    fn split(&mut self) {
-        let center_offset = self.size / 4_f64;
-        let mut dummy = TreeNode {
-            size: self.size / 2_f64,
-            ..Default::default()
-        };
-        dummy.center = [
-            self.center[0] + center_offset,
-            self.center[1] + center_offset,
-        ];
-        self.children.push(dummy.clone());
-        dummy.center = [
-            self.center[0] - center_offset,
-            self.center[1] + center_offset,
-        ];
-        self.children.push(dummy.clone());
-        dummy.center = [
-            self.center[0] - center_offset,
-            self.center[1] - center_offset,
-        ];
-        self.children.push(dummy.clone());
-        dummy.center = [
-            self.center[0] + center_offset,
-            self.center[1] - center_offset,
-        ];
-        self.children.push(dummy);
-    }
-
-    fn push_to_child(&mut self, body: &Body) {
-        if self.children.is_empty() {
-            self.split();
-        }
-
-        if body.position[0] > self.center[0] {
-            if body.position[1] > self.center[1] {
-                self.children[0].insert(body);
-            } else {
-                self.children[3].insert(body);
-            }
-        } else if body.position[1] > self.center[1] {
-            self.children[1].insert(body);
-        } else {
-            self.children[2].insert(body);
-        }
-    }
-
-    fn insert(&mut self, body: &Body) {
-        if self.children.is_empty() && self.body.is_none() {
-            self.body = Some(body.clone());
-        } else {
-            if let Some(b) = &self.body {
-                self.push_to_child(&b.clone());
-                self.body = None;
-            }
-
-            self.push_to_child(body);
-        }
-
-        self.mass += body.mass;
-        self.mass_center[0] = (self.mass_center[0] * (self.mass - body.mass)
-            + body.position[0] * body.mass)
-            / self.mass;
-        self.mass_center[1] = (self.mass_center[1] * (self.mass - body.mass)
-            + body.position[1] * body.mass)
-            / self.mass;
-    }
-
-    fn calculate_force(&self, body: &Body, theta: f64) -> [f64; 2] {
-        let displacement = [
-            self.mass_center[0] - body.position[0],
-            self.mass_center[1] - body.position[1],
-        ];
-        let distance =
-            (displacement[0] * displacement[0] + displacement[1] * displacement[1]).sqrt();
-
-        if distance < 1e-10f64 {
-            return [0f64; 2];
-        }
-
-        if let Some(b) = &self.body {
-            let f = G * b.mass * body.mass / (distance * distance);
-            [
-                f + displacement[0] / distance,
-                f + displacement[1] / distance,
-            ]
-        } else if !self.children.is_empty() {
-            if self.size / distance < theta {
-                let f = G * self.mass * body.mass / (distance * distance);
-                [
-                    f + displacement[0] / distance,
-                    f + displacement[1] / distance,
-                ]
-            } else {
-                let mut summed_force = [f64::default(); 2];
-                for child in self.children.iter() {
-                    let f = child.calculate_force(body, theta);
-                    summed_force[0] += f[0];
-                    summed_force[1] += f[1];
-                }
-
-                summed_force
-            }
-        } else {
-            // empty quadrant
-            [0f64; 2]
-        }
-    }
-
-    fn merge(&mut self, mut other: TreeNode) {
-        // this assumes that two trees with the same size and center get merged
-        assert!(self.size == other.size);
-        assert!(self.center == other.center);
-
-        if let Some(body) = &self.body {
-            // 1. case: self is single body
-            other.insert(body);
-            *self = other;
-        } else if self.children.is_empty() {
-            // 2. case: self is empty
-            *self = other;
-        } else {
-            // 3. case: self has children
-            // needs to handle three cases for other
-            if let Some(b) = &other.body {
-                self.insert(b);
-            } else if other.children.is_empty() {
-                // empty case, other is empty quadrant and nothing to do here...
-            } else {
-                for (self_child, other_child) in
-                    self.children.iter_mut().zip(other.children.into_iter())
-                {
-                    self_child.merge(other_child);
-                }
-
-                self.mass = self.children.iter().map(|c| c.mass).sum();
-                self.mass_center[0] = self
-                    .children
-                    .iter()
-                    .map(|c| c.mass_center[0] * c.mass)
-                    .sum::<f64>()
-                    / self.mass;
-                self.mass_center[1] = self
-                    .children
-                    .iter()
-                    .map(|c| c.mass_center[1] * c.mass)
-                    .sum::<f64>()
-                    / self.mass;
-            }
-        }
-    }
-
-    fn height(&self) -> usize {
-        return if self.children.is_empty() {
-            1
-        } else {
-            1 + self.children.iter().map(|c| c.height()).max().unwrap()
-        };
-    }
-}
-
+/// Calculate the center for the root node.
+///
+/// * `bodies`: Slice of all bodies.
 fn calc_center(bodies: &[Body]) -> [f64; 2] {
     let x = bodies.iter().map(|b| b.position[0]).sum::<f64>() / bodies.len() as f64;
     let y = bodies.iter().map(|b| b.position[1]).sum::<f64>() / bodies.len() as f64;
@@ -234,6 +70,9 @@ fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
     result.iter().map(|x| x * (max - min) + min).collect()
 }
 
+/// Gather outer bounds of all given bodies and get the max of both dimensions.
+///
+/// * `positions`: Positions of all bodies.
 fn get_size(positions: &[[f64; 2]]) -> f64 {
     f64::max(
         positions
@@ -259,6 +98,20 @@ fn get_size(positions: &[[f64; 2]]) -> f64 {
     )
 }
 
+/// Execute one parallelized step of the Barnes-Hut algorithm.
+///
+/// 1. Create a tree from the local bodies.
+/// 2. Serialize the tree.
+/// 3. Share tree with other processes and gather from them.
+/// 4. Deserialize others' trees.
+/// 5. Merge others' trees into own.
+/// 6. Calculate forces recursively for the local bodies.
+///
+/// * `world`: MPI communicator
+/// * `timestep`: Size of timesteps
+/// * `theta`: Theta threshold of the algorithm
+/// * `local_bodies`: Bodies to compute values for locally.
+/// * `root`: Root tree node which already contains size and center respecting ALL bodies.
 fn barnes_hut(
     world: &SimpleCommunicator,
     timestep: f64,
@@ -424,7 +277,7 @@ fn main() {
     let local_range = rank * bodies_per_proc..(rank + 1) * bodies_per_proc;
     let mut local_bodies: Vec<Body> = all_bodies[local_range.clone()].into();
 
-    for step in 0..args.n_steps {
+    for _step in 0..args.n_steps {
         // initial tree root
         let mut tree = TreeNode::default();
         tree.center = calc_center(&all_bodies);
