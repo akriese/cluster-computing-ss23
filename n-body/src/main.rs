@@ -163,13 +163,6 @@ impl TreeNode {
     }
 }
 
-fn calc_center(bodies: &[Body]) -> [f64; 2] {
-    let x = bodies.iter().map(|b| b.position[0]).sum::<f64>() / bodies.len() as f64;
-    let y = bodies.iter().map(|b| b.position[1]).sum::<f64>() / bodies.len() as f64;
-
-    [x, y]
-}
-
 /// Generates a float vector of the given length within a given min-max range.
 ///
 /// * `n`: Length of the output vector.
@@ -182,43 +175,57 @@ fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
     result.iter().map(|x| x * (max - min) + min).collect()
 }
 
-fn get_size(positions: &[[f64; 2]]) -> f64 {
-    f64::max(
-        positions
-            .iter()
-            .map(|p| p[0])
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-            - positions
+/// Gather outer bounds of all given bodies
+///
+/// * `positions`: Positions of all bodies.
+fn get_bounds(positions: &[[f64; 2]]) -> [[f64; 2]; 2] {
+    [
+        [
+            positions
                 .iter()
                 .map(|p| p[0])
                 .min_by(|a, b| a.partial_cmp(b).unwrap())
                 .unwrap(),
-        positions
-            .iter()
-            .map(|p| p[1])
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-            - positions
+            positions
+                .iter()
+                .map(|p| p[0])
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap(),
+        ],
+        [
+            positions
                 .iter()
                 .map(|p| p[1])
                 .min_by(|a, b| a.partial_cmp(b).unwrap())
                 .unwrap(),
-    )
+            positions
+                .iter()
+                .map(|p| p[1])
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap(),
+        ],
+    ]
 }
 
 fn barnes_hut(bodies: &Vec<Body>, timestep: f64, theta: f64, local_bodies: &mut Vec<Body>) {
     let mut start_time = mpi::time();
     let mut current_time;
 
-    // build the tree
-    let mut tree = TreeNode::default();
-    tree.center = calc_center(&bodies);
-    tree.size = get_size(&bodies.iter().map(|b| b.position).collect::<Vec<[f64; 2]>>());
+    // initial tree root
+    let bounds = get_bounds(&bodies.iter().map(|b| b.position).collect::<Vec<[f64; 2]>>());
+    let size = f64::max(bounds[0][1] - bounds[0][0], bounds[1][1] - bounds[1][0]);
+    let mut tree = TreeNode {
+        center: [
+            (bounds[0][1] + bounds[0][0]) / 2f64,
+            (bounds[1][1] + bounds[1][0]) / 2f64,
+        ],
+        size,
+        ..TreeNode::default()
+    };
 
     for body in bodies {
         if body.mass > 0f64 {
-            tree.insert(&body);
+            tree.insert(body);
         }
     }
 
@@ -275,8 +282,7 @@ fn main() {
             generate_random_bounded(args.n_bodies * 2, -args.velocity_max, args.velocity_max);
         init_velocities.extend(repeat(0f64).take(extra_n * 2));
 
-        for i in 0..filled_n {
-            let b = &mut all_bodies[i];
+        for (i, b) in all_bodies.iter_mut().enumerate() {
             b.id = i;
             b.mass = masses[i];
             b.position = all_positions[i * 2..(i + 1) * 2].try_into().unwrap();
@@ -290,7 +296,7 @@ fn main() {
     let local_range = rank * bodies_per_proc..(rank + 1) * bodies_per_proc;
     let mut local_bodies: Vec<Body> = all_bodies[local_range.clone()].into();
 
-    for step in 0..args.n_steps {
+    for _step in 0..args.n_steps {
         barnes_hut(&all_bodies, args.step_time, args.theta, &mut local_bodies);
 
         // all gather to share updated bodies
