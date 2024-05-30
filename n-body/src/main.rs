@@ -119,11 +119,11 @@ fn barnes_hut(
 
     for body in local_bodies.iter() {
         if body.mass > 0f64 {
-            root.insert(&body);
+            root.insert(body);
         }
     }
 
-    if world.rank() == 0 as i32 {
+    if world.rank() == 0_i32 {
         current_time = mpi::time();
         println!(
             "Tree built! time since step started: {} sec",
@@ -139,7 +139,7 @@ fn barnes_hut(
     let mut serialized_lengths = vec![0i32; world.size() as usize];
     world.all_gather_into(&(serialized.len() as i32), &mut serialized_lengths);
 
-    if world.rank() == 0 as i32 {
+    if world.rank() == 0_i32 {
         println!("Serialized lengths: {:?}", serialized_lengths);
     }
 
