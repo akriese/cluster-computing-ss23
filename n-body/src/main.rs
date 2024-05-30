@@ -48,16 +48,6 @@ struct Body {
     velocity: [f64; 2],
 }
 
-/// Calculate the center for the root node.
-///
-/// * `bodies`: Slice of all bodies.
-fn calc_center(bodies: &[Body]) -> [f64; 2] {
-    let x = bodies.iter().map(|b| b.position[0]).sum::<f64>() / bodies.len() as f64;
-    let y = bodies.iter().map(|b| b.position[1]).sum::<f64>() / bodies.len() as f64;
-
-    [x, y]
-}
-
 /// Generates a float vector of the given length within a given min-max range.
 ///
 /// * `n`: Length of the output vector.
@@ -70,32 +60,36 @@ fn generate_random_bounded(n: usize, min: f64, max: f64) -> Vec<f64> {
     result.iter().map(|x| x * (max - min) + min).collect()
 }
 
-/// Gather outer bounds of all given bodies and get the max of both dimensions.
+/// Gather outer bounds of all given bodies
 ///
 /// * `positions`: Positions of all bodies.
-fn get_size(positions: &[[f64; 2]]) -> f64 {
-    f64::max(
-        positions
-            .iter()
-            .map(|p| p[0])
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-            - positions
+fn get_bounds(positions: &[[f64; 2]]) -> [[f64; 2]; 2] {
+    [
+        [
+            positions
                 .iter()
                 .map(|p| p[0])
                 .min_by(|a, b| a.partial_cmp(b).unwrap())
                 .unwrap(),
-        positions
-            .iter()
-            .map(|p| p[1])
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-            - positions
+            positions
+                .iter()
+                .map(|p| p[0])
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap(),
+        ],
+        [
+            positions
                 .iter()
                 .map(|p| p[1])
                 .min_by(|a, b| a.partial_cmp(b).unwrap())
                 .unwrap(),
-    )
+            positions
+                .iter()
+                .map(|p| p[1])
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap(),
+        ],
+    ]
 }
 
 /// Execute one parallelized step of the Barnes-Hut algorithm.
@@ -262,8 +256,7 @@ fn main() {
             generate_random_bounded(args.n_bodies * 2, -args.velocity_max, args.velocity_max);
         init_velocities.extend(repeat(0f64).take(extra_n * 2));
 
-        for i in 0..filled_n {
-            let b = &mut all_bodies[i];
+        for (i, b) in all_bodies.iter_mut().enumerate() {
             b.id = i;
             b.mass = masses[i];
             b.position = all_positions[i * 2..(i + 1) * 2].try_into().unwrap();
@@ -279,14 +272,21 @@ fn main() {
 
     for _step in 0..args.n_steps {
         // initial tree root
-        let mut tree = TreeNode::default();
-        tree.center = calc_center(&all_bodies);
-        tree.size = get_size(
+        let bounds = get_bounds(
             &all_bodies
                 .iter()
                 .map(|b| b.position)
                 .collect::<Vec<[f64; 2]>>(),
         );
+        let size = f64::max(bounds[0][1] - bounds[0][0], bounds[1][1] - bounds[1][0]);
+        let mut tree = TreeNode {
+            center: [
+                (bounds[0][1] + bounds[0][0]) / 2f64,
+                (bounds[1][1] + bounds[1][0]) / 2f64,
+            ],
+            size,
+            ..TreeNode::default()
+        };
 
         barnes_hut(
             &world,
