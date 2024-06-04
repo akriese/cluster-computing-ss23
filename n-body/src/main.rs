@@ -1,15 +1,12 @@
 mod tree;
 
 use clap::Parser;
-use mpi::datatype::PartitionMut;
-use mpi::topology::SimpleCommunicator;
-use mpi::traits::*;
 use rand::{thread_rng, Rng};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::iter::repeat;
+use std::{iter::repeat, time::Instant};
 use tree::TreeNode;
 
-const ROOT_RANK: usize = 0;
 const G: f64 = 6.67e-11f64;
 
 #[derive(Parser, Debug)]
@@ -36,11 +33,14 @@ struct Args {
     #[arg(short = 'p', action)]
     print: bool,
 
-    #[arg(short = 't', default_value_t = 0.5)]
+    #[arg(short = 'T', default_value_t = 0.5)]
     theta: f64,
+
+    #[arg(short = 't')]
+    num_threads: Option<usize>,
 }
 
-#[derive(Clone, Debug, Equivalence, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct Body {
     id: usize,
     mass: f64,
@@ -101,139 +101,80 @@ fn get_bounds(positions: &[[f64; 2]]) -> [[f64; 2]; 2] {
 /// 5. Merge others' trees into own.
 /// 6. Calculate forces recursively for the local bodies.
 ///
-/// * `world`: MPI communicator
 /// * `timestep`: Size of timesteps
 /// * `theta`: Theta threshold of the algorithm
-/// * `local_bodies`: Bodies to compute values for locally.
+/// * `bodies`: Bodies to compute values for.
 /// * `root`: Root tree node which already contains size and center respecting ALL bodies.
+/// * `n_threads`: Number of parallel threads available.
 fn barnes_hut(
-    world: &SimpleCommunicator,
     timestep: f64,
     theta: f64,
-    local_bodies: &mut Vec<Body>,
+    bodies: &mut Vec<Body>,
     root: &mut TreeNode,
+    n_threads: usize,
 ) {
-    let root_copy = root.clone();
-    let mut start_time = mpi::time();
-    let mut current_time;
+    let mut start_time = std::time::Instant::now();
 
-    for body in local_bodies.iter() {
-        if body.mass > 0f64 {
-            root.insert(body);
-        }
-    }
+    let bodies_per_thread = bodies.len() / n_threads;
 
-    if world.rank() == 0_i32 {
-        current_time = mpi::time();
-        println!(
-            "Tree built! time since step started: {} sec",
-            current_time - start_time
-        );
-        start_time = current_time;
-    }
+    let thread_trees = (0..n_threads)
+        .into_par_iter()
+        .map(|t| {
+            let mut thread_root = root.clone();
 
-    // serialize own tree
-    let serialized = bitcode::serialize(&root).unwrap();
+            bodies[t * bodies_per_thread..(t + 1) * bodies_per_thread]
+                .iter()
+                .for_each(|b| {
+                    if b.mass > 0f64 {
+                        thread_root.insert(b);
+                    }
+                });
 
-    // send length of serialization to all processes
-    let mut serialized_lengths = vec![0i32; world.size() as usize];
-    world.all_gather_into(&(serialized.len() as i32), &mut serialized_lengths);
-
-    if world.rank() == 0_i32 {
-        println!("Serialized lengths: {:?}", serialized_lengths);
-    }
-
-    // root gathers all serialized trees
-    let total_serialized_length = serialized_lengths.iter().sum::<i32>() as usize;
-    let mut all_trees_buf = vec![0u8; total_serialized_length];
-    let offsets: Vec<i32> = serialized_lengths
-        .iter()
-        .scan(0, |acc, &x| {
-            let tmp = *acc;
-            *acc += x;
-            Some(tmp)
-        })
-        .collect();
-    let mut partition = PartitionMut::new(&mut all_trees_buf[..], serialized_lengths, &offsets[..]);
-    world.all_gather_varcount_into(&serialized, &mut partition);
-
-    // each process deserializes all trees
-    let all_trees = offsets
-        .iter()
-        .enumerate()
-        .map(|(i, offset)| {
-            if i == world.rank() as usize {
-                // just take empty tree here, to skip deserialization of the
-                // tree that was created by the process itself.
-                // Later, all trees will be merged into the process-local root.
-                return root_copy.clone();
-            }
-
-            let end_offset = if i == world.size() as usize - 1 {
-                total_serialized_length
-            } else {
-                offsets[i + 1] as usize
-            };
-            bitcode::deserialize::<TreeNode>(&all_trees_buf[*offset as usize..end_offset]).unwrap()
+            thread_root
         })
         .collect::<Vec<TreeNode>>();
 
-    if world.rank() == 0_i32 {
-        current_time = mpi::time();
-        println!(
-            "All trees shared and parsed! time since step started: {} sec",
-            current_time - start_time
-        );
-        start_time = current_time;
-    }
-
-    // merge all parsed trees into the local root tree, consuming the parsed trees
-    for tree in all_trees {
+    for tree in thread_trees {
         root.merge(tree);
     }
 
-    if world.rank() == 0_i32 {
-        current_time = mpi::time();
-        println!(
-            "Trees merged! (Height: {}) time since step started: {} sec",
-            root.height(),
-            current_time - start_time
-        );
-        start_time = current_time;
-    }
+    println!(
+        "Tree built! time since step started: {:.2?}",
+        start_time.elapsed()
+    );
+    start_time = Instant::now();
 
     // calculate forces, velocity and positions for given range
-    for b in local_bodies {
+    bodies.par_iter_mut().for_each(|b| {
         if b.mass == 0f64 {
-            continue;
+            return;
         }
 
         let f = root.calculate_force(b, theta);
         b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
         b.position = calc_position(&b.velocity, &b.position, timestep);
-    }
+    });
 
-    if world.rank() == 0_i32 {
-        current_time = mpi::time();
-        println!(
-            "Forces calculated! time since step started: {} sec",
-            current_time - start_time
-        );
-    }
+    println!(
+        "Forces calculated! time since step started: {:.2?}",
+        start_time.elapsed()
+    );
 }
 
 fn main() {
     // parse hyperparameteres; shared between all processes without sending them actively
     let args = Args::parse();
 
-    let universe = mpi::initialize().unwrap();
-    let world = universe.world();
+    if let Some(threads) = args.num_threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .unwrap();
+    }
 
-    let root_proc = world.process_at_rank(ROOT_RANK as i32);
-    let n_proc = world.size() as usize;
-    let rank = world.rank() as usize;
+    let n_proc = args.num_threads.unwrap_or(1);
 
-    let start_time = mpi::time();
+    let start_time = Instant::now();
 
     // we add zero weight bodies at the end
     // so that all processes get the same amount of bodies
@@ -243,32 +184,23 @@ fn main() {
 
     let mut all_bodies = vec![Body::default(); filled_n];
 
-    // root creates input
-    if rank == ROOT_RANK {
-        let mut masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
-        masses.extend(repeat(0f64).take(extra_n));
+    // create input
+    let mut masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
+    masses.extend(repeat(0f64).take(extra_n));
 
-        let mut all_positions =
-            generate_random_bounded(args.n_bodies * 2, -args.pos_max, args.pos_max);
-        all_positions.extend(repeat(0f64).take(extra_n * 2));
+    let mut all_positions = generate_random_bounded(args.n_bodies * 2, -args.pos_max, args.pos_max);
+    all_positions.extend(repeat(0f64).take(extra_n * 2));
 
-        let mut init_velocities =
-            generate_random_bounded(args.n_bodies * 2, -args.velocity_max, args.velocity_max);
-        init_velocities.extend(repeat(0f64).take(extra_n * 2));
+    let mut init_velocities =
+        generate_random_bounded(args.n_bodies * 2, -args.velocity_max, args.velocity_max);
+    init_velocities.extend(repeat(0f64).take(extra_n * 2));
 
-        for (i, b) in all_bodies.iter_mut().enumerate() {
-            b.id = i;
-            b.mass = masses[i];
-            b.position = all_positions[i * 2..(i + 1) * 2].try_into().unwrap();
-            b.velocity = init_velocities[i * 2..(i + 1) * 2].try_into().unwrap();
-        }
+    for (i, b) in all_bodies.iter_mut().enumerate() {
+        b.id = i;
+        b.mass = masses[i];
+        b.position = all_positions[i * 2..(i + 1) * 2].try_into().unwrap();
+        b.velocity = init_velocities[i * 2..(i + 1) * 2].try_into().unwrap();
     }
-
-    // share all bodies with other processes
-    root_proc.broadcast_into(&mut all_bodies);
-
-    let local_range = rank * bodies_per_proc..(rank + 1) * bodies_per_proc;
-    let mut local_bodies: Vec<Body> = all_bodies[local_range.clone()].into();
 
     for _step in 0..args.n_steps {
         // initial tree root
@@ -289,20 +221,15 @@ fn main() {
         };
 
         barnes_hut(
-            &world,
             args.step_time,
             args.theta,
-            &mut local_bodies,
+            &mut all_bodies,
             &mut tree,
+            args.num_threads.unwrap_or(1),
         );
-
-        // all gather to share updated bodies
-        world.all_gather_into(&local_bodies, &mut all_bodies);
     }
 
-    if rank == ROOT_RANK {
-        println!("It took {} seconds!", mpi::time() - start_time);
-    }
+    println!("It took {:.2?}!", start_time.elapsed());
 }
 
 /// Calculate the new velocity of a body.
