@@ -117,6 +117,7 @@ fn barnes_hut(
 
     let bodies_per_thread = bodies.len() / n_threads;
 
+    // create NUM_THREADS trees in parallel
     let thread_trees = (0..n_threads)
         .into_par_iter()
         .map(|t| {
@@ -134,12 +135,19 @@ fn barnes_hut(
         })
         .collect::<Vec<TreeNode>>();
 
+    println!(
+        "subtrees built! time since step started: {:.2?}",
+        start_time.elapsed()
+    );
+    start_time = Instant::now();
+
+    // merge the trees to a big tree
     for tree in thread_trees {
         root.merge(tree);
     }
 
     println!(
-        "Tree built! time since step started: {:.2?}",
+        "Trees merged! time since step started: {:.2?}",
         start_time.elapsed()
     );
     start_time = Instant::now();
