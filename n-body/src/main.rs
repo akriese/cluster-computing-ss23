@@ -118,25 +118,27 @@ fn barnes_hut(
     let bodies_per_thread = bodies.len() / n_threads;
 
     // create NUM_THREADS trees in parallel
-    let thread_trees = (0..n_threads)
-        .into_par_iter()
-        .map(|t| {
+    let thread_trees = bodies
+        .par_chunks(bodies_per_thread)
+        .map(|bs| {
             let mut thread_root = root.clone();
 
-            bodies[t * bodies_per_thread..(t + 1) * bodies_per_thread]
-                .iter()
-                .for_each(|b| {
-                    if b.mass > 0f64 {
-                        thread_root.insert(b);
-                    }
-                });
+            bs.iter().for_each(|b| {
+                if b.mass > 0f64 {
+                    thread_root.insert(b);
+                }
+            });
 
             thread_root
         })
         .collect::<Vec<TreeNode>>();
 
     println!(
-        "subtrees built! time since step started: {:.2?}",
+        "subtrees built! heights: {:?}; time since step started: {:.2?}",
+        thread_trees
+            .iter()
+            .map(|t| t.height())
+            .collect::<Vec<usize>>(),
         start_time.elapsed()
     );
     start_time = Instant::now();
@@ -152,15 +154,19 @@ fn barnes_hut(
     );
     start_time = Instant::now();
 
-    // calculate forces, velocity and positions for given range
-    bodies.par_iter_mut().for_each(|b| {
-        if b.mass == 0f64 {
-            return;
-        }
+    // calculate forces, velocity and positions
+    // dont simply use par_iter_mut() as this would lead to false sharing
+    // using par_chunks_mut() has better cache behaviour
+    bodies.par_chunks_mut(bodies_per_thread).for_each(|bs| {
+        bs.iter_mut().for_each(|b| {
+            if b.mass == 0f64 {
+                return;
+            }
 
-        let f = root.calculate_force(b, theta);
-        b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
-        b.position = calc_position(&b.velocity, &b.position, timestep);
+            let f = root.calculate_force(b, theta);
+            b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
+            b.position = calc_position(&b.velocity, &b.position, timestep);
+        });
     });
 
     println!(
