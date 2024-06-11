@@ -1,6 +1,7 @@
 mod tree;
 
 use clap::Parser;
+use mpi::traits::*;
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use std::{iter::repeat, time::Instant};
 use tree::TreeNode;
 
 const G: f64 = 6.67e-11f64;
+const ROOT_RANK: usize = 0;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about=None)]
@@ -37,10 +39,10 @@ struct Args {
     theta: f64,
 
     #[arg(short = 't')]
-    num_threads: Option<usize>,
+    threads_per_node: Option<usize>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Equivalence, Deserialize, Serialize)]
 struct Body {
     id: usize,
     mass: f64,
@@ -103,22 +105,24 @@ fn get_bounds(positions: &[[f64; 2]]) -> [[f64; 2]; 2] {
 ///
 /// * `timestep`: Size of timesteps
 /// * `theta`: Theta threshold of the algorithm
-/// * `bodies`: Bodies to compute values for.
+/// * `all_bodies`: All bodies of the system.
+/// * `local_bodies`: Bodies to compute values for.
 /// * `root`: Root tree node which already contains size and center respecting ALL bodies.
 /// * `n_threads`: Number of parallel threads available.
 fn barnes_hut(
     timestep: f64,
     theta: f64,
-    bodies: &mut Vec<Body>,
+    all_bodies: &Vec<Body>,
+    local_bodies: &mut Vec<Body>,
     root: &mut TreeNode,
     n_threads: usize,
 ) {
     let mut start_time = std::time::Instant::now();
 
-    let bodies_per_thread = bodies.len() / n_threads;
+    let bodies_per_thread = all_bodies.len() / n_threads;
 
     // create NUM_THREADS trees in parallel
-    let thread_trees = bodies
+    let thread_trees = all_bodies
         .par_chunks(bodies_per_thread)
         .map(|bs| {
             let mut thread_root = root.clone();
@@ -155,18 +159,14 @@ fn barnes_hut(
     start_time = Instant::now();
 
     // calculate forces, velocity and positions
-    // dont simply use par_iter_mut() as this would lead to false sharing
-    // using par_chunks_mut() has better cache behaviour
-    bodies.par_chunks_mut(bodies_per_thread).for_each(|bs| {
-        bs.iter_mut().for_each(|b| {
-            if b.mass == 0f64 {
-                return;
-            }
+    local_bodies.par_iter_mut().for_each(|b| {
+        if b.mass == 0f64 {
+            return;
+        }
 
-            let f = root.calculate_force(b, theta);
-            b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
-            b.position = calc_position(&b.velocity, &b.position, timestep);
-        });
+        let f = root.calculate_force(b, theta);
+        b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
+        b.position = calc_position(&b.velocity, &b.position, timestep);
     });
 
     println!(
@@ -176,45 +176,62 @@ fn barnes_hut(
 }
 
 fn main() {
+    let universe = mpi::initialize().unwrap();
+    let world = universe.world();
+    let n_nodes = world.size();
+    let rank = world.rank() as usize;
+
+    let is_root = rank == ROOT_RANK;
+
     // parse hyperparameteres; shared between all processes without sending them actively
     let args = Args::parse();
 
-    if let Some(threads) = args.num_threads {
+    if let Some(threads) = args.threads_per_node {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build_global()
             .unwrap();
     }
 
-    let n_proc = args.num_threads.unwrap_or(1);
+    let n_threads = args.threads_per_node.unwrap_or(1);
 
     let start_time = Instant::now();
 
     // we add zero weight bodies at the end
     // so that all processes get the same amount of bodies
-    let bodies_per_proc = (args.n_bodies as f64 / n_proc as f64).ceil() as usize;
-    let filled_n = bodies_per_proc * n_proc;
+    let bodies_per_proc = (args.n_bodies as f64 / n_nodes as f64).ceil() as usize;
+    let filled_n = bodies_per_proc * n_nodes as usize;
     let extra_n = filled_n - args.n_bodies;
 
     let mut all_bodies = vec![Body::default(); filled_n];
 
-    // create input
-    let mut masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
-    masses.extend(repeat(0f64).take(extra_n));
+    if is_root {
+        // create input
+        let mut masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
+        masses.extend(repeat(0f64).take(extra_n));
 
-    let mut all_positions = generate_random_bounded(args.n_bodies * 2, -args.pos_max, args.pos_max);
-    all_positions.extend(repeat(0f64).take(extra_n * 2));
+        let mut all_positions =
+            generate_random_bounded(args.n_bodies * 2, -args.pos_max, args.pos_max);
+        all_positions.extend(repeat(0f64).take(extra_n * 2));
 
-    let mut init_velocities =
-        generate_random_bounded(args.n_bodies * 2, -args.velocity_max, args.velocity_max);
-    init_velocities.extend(repeat(0f64).take(extra_n * 2));
+        let mut init_velocities =
+            generate_random_bounded(args.n_bodies * 2, -args.velocity_max, args.velocity_max);
+        init_velocities.extend(repeat(0f64).take(extra_n * 2));
 
-    for (i, b) in all_bodies.iter_mut().enumerate() {
-        b.id = i;
-        b.mass = masses[i];
-        b.position = all_positions[i * 2..(i + 1) * 2].try_into().unwrap();
-        b.velocity = init_velocities[i * 2..(i + 1) * 2].try_into().unwrap();
+        for (i, b) in all_bodies.iter_mut().enumerate() {
+            b.id = i;
+            b.mass = masses[i];
+            b.position = all_positions[i * 2..(i + 1) * 2].try_into().unwrap();
+            b.velocity = init_velocities[i * 2..(i + 1) * 2].try_into().unwrap();
+        }
     }
+
+    world
+        .process_at_rank(ROOT_RANK as i32)
+        .broadcast_into(&mut all_bodies);
+
+    let mut local_bodies: Vec<Body> =
+        all_bodies[rank * bodies_per_proc..(rank + 1) * bodies_per_proc].into();
 
     for _step in 0..args.n_steps {
         // initial tree root
@@ -237,13 +254,18 @@ fn main() {
         barnes_hut(
             args.step_time,
             args.theta,
-            &mut all_bodies,
+            &all_bodies,
+            &mut local_bodies,
             &mut tree,
-            args.num_threads.unwrap_or(1),
+            n_threads,
         );
+
+        world.all_gather_into(&local_bodies, &mut all_bodies);
     }
 
-    println!("It took {:.2?}!", start_time.elapsed());
+    if is_root {
+        println!("It took {:.2?}!", start_time.elapsed());
+    }
 }
 
 /// Calculate the new velocity of a body.
