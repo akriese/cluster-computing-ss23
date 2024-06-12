@@ -96,6 +96,7 @@ fn get_bounds(positions: &[[f64; 2]]) -> [[f64; 2]; 2] {
 }
 
 static mut SUBTREE_DURATIONS: Vec<Duration> = vec![];
+static mut SUBTREE_GATHER_DURATIONS: Vec<Duration> = vec![];
 static mut MERGE_DURATIONS: Vec<Duration> = vec![];
 static mut CALC_DURATIONS: Vec<Duration> = vec![];
 static mut GATHER_DURATIONS: Vec<Duration> = vec![];
@@ -181,6 +182,12 @@ fn barnes_hut(
             bitcode::deserialize::<TreeNode>(&all_trees_buf[*offset as usize..end_offset]).unwrap()
         })
         .collect::<Vec<TreeNode>>();
+
+    unsafe {
+        SUBTREE_GATHER_DURATIONS.push(start_time.elapsed());
+    }
+
+    start_time = Instant::now();
 
     // merge all parsed trees into the local root tree, consuming the parsed trees
     for tree in all_trees {
@@ -293,6 +300,11 @@ fn main() {
         "Rank {}: Avg subtree building duration: {:.2?}",
         rank,
         avg_duration(unsafe { &SUBTREE_DURATIONS })
+    );
+    println!(
+        "Rank {}: Avg subtree comm duration: {:.2?}",
+        rank,
+        avg_duration(unsafe { &SUBTREE_GATHER_DURATIONS })
     );
     println!(
         "Rank {}: Avg merge duration: {:.2?}",
