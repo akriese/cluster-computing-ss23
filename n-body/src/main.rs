@@ -1,7 +1,7 @@
 mod tree;
 
 use clap::Parser;
-use mpi::traits::*;
+use mpi::{datatype::PartitionMut, topology::SimpleCommunicator, traits::*};
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -113,24 +113,24 @@ static mut GATHER_DURATIONS: Vec<Duration> = vec![];
 ///
 /// * `timestep`: Size of timesteps
 /// * `theta`: Theta threshold of the algorithm
-/// * `all_bodies`: All bodies of the system.
 /// * `local_bodies`: Bodies to compute values for.
 /// * `root`: Root tree node which already contains size and center respecting ALL bodies.
 /// * `n_threads`: Number of parallel threads available.
+/// * `world`: MPI communicator.
 fn barnes_hut(
     timestep: f64,
     theta: f64,
-    all_bodies: &Vec<Body>,
     local_bodies: &mut Vec<Body>,
     root: &mut TreeNode,
     n_threads: usize,
+    world: &SimpleCommunicator,
 ) {
     let mut start_time = std::time::Instant::now();
 
-    let bodies_per_thread = all_bodies.len() / n_threads;
+    let bodies_per_thread = local_bodies.len() / n_threads + 1;
 
     // create NUM_THREADS trees in parallel
-    let thread_trees = all_bodies
+    let thread_trees = local_bodies
         .par_chunks(bodies_per_thread)
         .map(|bs| {
             let mut thread_root = root.clone();
@@ -145,32 +145,67 @@ fn barnes_hut(
         })
         .collect::<Vec<TreeNode>>();
 
-    unsafe {
-        SUBTREE_DURATIONS.push(start_time.elapsed());
-    }
-
-    // println!(
-    //     "subtrees built! heights: {:?}; time since step started: {:.2?}",
-    //     thread_trees
-    //         .iter()
-    //         .map(|t| t.height())
-    //         .collect::<Vec<usize>>(),
-    //     start_time.elapsed()
-    // );
-    start_time = Instant::now();
-
     // merge the trees to a big tree
     for tree in thread_trees {
         root.merge(tree);
     }
 
     unsafe {
+        SUBTREE_DURATIONS.push(start_time.elapsed());
+    }
+
+    start_time = Instant::now();
+
+    if world.size() > 1 {
+        // serialize own tree
+        let serialized = bitcode::serialize(&root).unwrap();
+
+        // send length of serialization to all processes
+        let mut serialized_lengths = vec![0i32; world.size() as usize];
+        world.all_gather_into(&(serialized.len() as i32), &mut serialized_lengths);
+
+        // root gathers all serialized trees
+        let total_serialized_length = serialized_lengths.iter().sum::<i32>() as usize;
+        let mut all_trees_buf = vec![0u8; total_serialized_length];
+        let offsets: Vec<i32> = serialized_lengths
+            .iter()
+            .scan(0, |acc, &x| {
+                let tmp = *acc;
+                *acc += x;
+                Some(tmp)
+            })
+            .collect();
+        let mut partition =
+            PartitionMut::new(&mut all_trees_buf[..], serialized_lengths, &offsets[..]);
+        world.all_gather_varcount_into(&serialized, &mut partition);
+
+        // each process deserializes all trees
+        let all_trees = offsets
+            .par_iter()
+            .enumerate()
+            .map(|(i, offset)| {
+                let end_offset = if i == world.size() as usize - 1 {
+                    total_serialized_length
+                } else {
+                    offsets[i + 1] as usize
+                };
+                bitcode::deserialize::<TreeNode>(&all_trees_buf[*offset as usize..end_offset])
+                    .unwrap()
+            })
+            .collect::<Vec<TreeNode>>();
+
+        // merge all parsed trees into the local root tree, consuming the parsed trees
+        for (i, tree) in all_trees.into_iter().enumerate() {
+            if i != world.rank() as usize {
+                root.merge(tree);
+            }
+        }
+    }
+
+    unsafe {
         MERGE_DURATIONS.push(start_time.elapsed());
     }
-    // println!(
-    //     "Trees merged! time since step started: {:.2?}",
-    //     start_time.elapsed()
-    // );
+
     start_time = Instant::now();
 
     // calculate forces, velocity and positions
@@ -187,10 +222,6 @@ fn barnes_hut(
     unsafe {
         CALC_DURATIONS.push(start_time.elapsed());
     }
-    // println!(
-    //     "Forces calculated! time since step started: {:.2?}",
-    //     start_time.elapsed()
-    // );
 }
 
 fn main() {
@@ -272,10 +303,10 @@ fn main() {
         barnes_hut(
             args.step_time,
             args.theta,
-            &all_bodies,
             &mut local_bodies,
             &mut tree,
             n_threads,
+            &world,
         );
 
         let start_time = Instant::now();
