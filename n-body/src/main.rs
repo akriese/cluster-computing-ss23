@@ -180,11 +180,12 @@ fn barnes_hut(
         world.all_gather_varcount_into(&serialized, &mut partition);
 
         // each process deserializes all trees
+        let world_size = world.size();
         let all_trees = offsets
             .par_iter()
             .enumerate()
             .map(|(i, offset)| {
-                let end_offset = if i == world.size() as usize - 1 {
+                let end_offset = if i == world_size as usize - 1 {
                     total_serialized_length
                 } else {
                     offsets[i + 1] as usize
