@@ -5,7 +5,10 @@ use mpi::traits::*;
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{iter::repeat, time::Instant};
+use std::{
+    iter::repeat,
+    time::{Duration, Instant},
+};
 use tree::TreeNode;
 
 const G: f64 = 6.67e-11f64;
@@ -94,6 +97,11 @@ fn get_bounds(positions: &[[f64; 2]]) -> [[f64; 2]; 2] {
     ]
 }
 
+static mut SUBTREE_DURATIONS: Vec<Duration> = vec![];
+static mut MERGE_DURATIONS: Vec<Duration> = vec![];
+static mut CALC_DURATIONS: Vec<Duration> = vec![];
+static mut GATHER_DURATIONS: Vec<Duration> = vec![];
+
 /// Execute one parallelized step of the Barnes-Hut algorithm.
 ///
 /// 1. Create a tree from the local bodies.
@@ -137,14 +145,18 @@ fn barnes_hut(
         })
         .collect::<Vec<TreeNode>>();
 
-    println!(
-        "subtrees built! heights: {:?}; time since step started: {:.2?}",
-        thread_trees
-            .iter()
-            .map(|t| t.height())
-            .collect::<Vec<usize>>(),
-        start_time.elapsed()
-    );
+    unsafe {
+        SUBTREE_DURATIONS.push(start_time.elapsed());
+    }
+
+    // println!(
+    //     "subtrees built! heights: {:?}; time since step started: {:.2?}",
+    //     thread_trees
+    //         .iter()
+    //         .map(|t| t.height())
+    //         .collect::<Vec<usize>>(),
+    //     start_time.elapsed()
+    // );
     start_time = Instant::now();
 
     // merge the trees to a big tree
@@ -152,10 +164,13 @@ fn barnes_hut(
         root.merge(tree);
     }
 
-    println!(
-        "Trees merged! time since step started: {:.2?}",
-        start_time.elapsed()
-    );
+    unsafe {
+        MERGE_DURATIONS.push(start_time.elapsed());
+    }
+    // println!(
+    //     "Trees merged! time since step started: {:.2?}",
+    //     start_time.elapsed()
+    // );
     start_time = Instant::now();
 
     // calculate forces, velocity and positions
@@ -169,10 +184,13 @@ fn barnes_hut(
         b.position = calc_position(&b.velocity, &b.position, timestep);
     });
 
-    println!(
-        "Forces calculated! time since step started: {:.2?}",
-        start_time.elapsed()
-    );
+    unsafe {
+        CALC_DURATIONS.push(start_time.elapsed());
+    }
+    // println!(
+    //     "Forces calculated! time since step started: {:.2?}",
+    //     start_time.elapsed()
+    // );
 }
 
 fn main() {
@@ -260,12 +278,48 @@ fn main() {
             n_threads,
         );
 
+        let start_time = Instant::now();
         world.all_gather_into(&local_bodies, &mut all_bodies);
+        unsafe { GATHER_DURATIONS.push(start_time.elapsed()) }
     }
+
+    println!(
+        "Rank {}: Avg subtree building duration: {:.2?}",
+        rank,
+        avg_duration(unsafe { &SUBTREE_DURATIONS })
+    );
+    println!(
+        "Rank {}: Avg merge duration: {:.2?}",
+        rank,
+        avg_duration(unsafe { &MERGE_DURATIONS })
+    );
+    println!(
+        "Rank {}: Avg force calc duration: {:.2?}",
+        rank,
+        avg_duration(unsafe { &CALC_DURATIONS })
+    );
+    println!(
+        "Rank {}: Avg gather duration: {:.2?}",
+        rank,
+        avg_duration(unsafe { &GATHER_DURATIONS })
+    );
 
     if is_root {
         println!("It took {:.2?}!", start_time.elapsed());
     }
+}
+
+fn avg_duration(durations: &Vec<Duration>) -> Duration {
+    assert!(!durations.is_empty());
+
+    let mut summed_durs = durations[0];
+
+    durations
+        .iter()
+        .skip(1)
+        .for_each(|d| summed_durs = summed_durs.checked_add(d.clone()).unwrap());
+
+    summed_durs / durations.len() as u32
 }
 
 /// Calculate the new velocity of a body.
