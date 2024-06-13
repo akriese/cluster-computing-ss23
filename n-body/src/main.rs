@@ -117,10 +117,11 @@ static mut GATHER_DURATIONS: Vec<Duration> = vec![];
 fn barnes_hut(
     timestep: f64,
     theta: f64,
-    all_bodies: &Vec<Body>,
-    local_bodies: &mut Vec<Body>,
+    all_bodies: &mut Vec<Body>,
     root: &mut TreeNode,
     n_threads: usize,
+    n_proc: usize,
+    rank: usize,
 ) {
     let mut start_time = std::time::Instant::now();
 
@@ -158,15 +159,17 @@ fn barnes_hut(
     start_time = Instant::now();
 
     // calculate forces, velocity and positions
-    local_bodies.par_iter_mut().for_each(|b| {
-        if b.mass == 0f64 {
-            return;
-        }
+    all_bodies[rank * bodies_per_thread..(rank + 1) * bodies_per_thread]
+        .par_iter_mut()
+        .for_each(|b| {
+            if b.mass == 0f64 {
+                return;
+            }
 
-        let f = root.calculate_force(b, theta);
-        b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
-        b.position = calc_position(&b.velocity, &b.position, timestep);
-    });
+            let f = root.calculate_force(b, theta);
+            b.velocity = calc_velocity(&b.velocity, &f, b.mass, timestep);
+            b.position = calc_position(&b.velocity, &b.position, timestep);
+        });
 
     unsafe {
         CALC_DURATIONS.push(start_time.elapsed());
@@ -229,9 +232,6 @@ fn main() {
         .process_at_rank(ROOT_RANK as i32)
         .broadcast_into(&mut all_bodies);
 
-    let mut local_bodies: Vec<Body> =
-        all_bodies[rank * bodies_per_proc..(rank + 1) * bodies_per_proc].into();
-
     for _step in 0..args.n_steps {
         // initial tree root
         let bounds = get_bounds(
@@ -253,16 +253,22 @@ fn main() {
         barnes_hut(
             args.step_time,
             args.theta,
-            &all_bodies,
-            &mut local_bodies,
+            &mut all_bodies,
             &mut tree,
             n_threads,
+            world.size() as usize,
+            rank,
         );
 
         let start_time = Instant::now();
-        println!("Rank {} entered the Allgather at {:?}", rank, start_time);
+        println!("Rank {} entered the broadcast at {:?}", rank, start_time);
         // share bodies between all processes
-        world.all_gather_into(&local_bodies, &mut all_bodies);
+        for r in 0..world.size() as usize {
+            world
+                .process_at_rank(r as i32)
+                .broadcast_into(&mut all_bodies[r * bodies_per_proc..(r + 1) * bodies_per_proc]);
+        }
+        // world.all_gather_into(&local_bodies, &mut all_bodies);
         unsafe { GATHER_DURATIONS.push(start_time.elapsed()) }
         println!(
             "Rank {} finished the Allgather at {:?}",
