@@ -128,7 +128,7 @@ fn barnes_hut(
     let bodies_per_thread = all_bodies.len() / n_threads;
 
     // create NUM_THREADS trees in parallel
-    let thread_trees = all_bodies
+    let mut thread_trees = all_bodies
         .par_chunks(bodies_per_thread)
         .map(|bs| {
             let mut thread_root = root.clone();
@@ -148,10 +148,18 @@ fn barnes_hut(
     }
     start_time = Instant::now();
 
-    // merge the trees to a big tree
-    for tree in thread_trees {
-        root.merge(tree);
-    }
+    println!("merging...");
+
+    // merge the trees to a big tree, merge the trees in parallel
+    thread_trees
+        .drain(..)
+        .par_bridge()
+        .reduce_with(|mut a, b| {
+            a.merge(b);
+            a
+        })
+        .unwrap();
+    println!("done...");
 
     unsafe {
         MERGE_DURATIONS.push(start_time.elapsed());
@@ -261,7 +269,7 @@ fn main() {
         );
 
         let start_time = Instant::now();
-        println!("Rank {} entered the broadcast at {:?}", rank, start_time);
+        // println!("Rank {} entered the broadcast at {:?}", rank, start_time);
         // share bodies between all processes
         for r in 0..world.size() as usize {
             world
@@ -270,11 +278,11 @@ fn main() {
         }
         // world.all_gather_into(&local_bodies, &mut all_bodies);
         unsafe { GATHER_DURATIONS.push(start_time.elapsed()) }
-        println!(
-            "Rank {} finished the Allgather at {:?}",
-            rank,
-            Instant::now()
-        );
+        // println!(
+        //     "Rank {} finished the Allgather at {:?}",
+        //     rank,
+        //     Instant::now()
+        // );
     }
 
     println!(
