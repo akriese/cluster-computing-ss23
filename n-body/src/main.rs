@@ -260,9 +260,15 @@ fn main() {
         );
 
         let start_time = Instant::now();
+        println!("Rank {} entered the Allgather at {:?}", rank, start_time);
         // share bodies between all processes
         world.all_gather_into(&local_bodies, &mut all_bodies);
         unsafe { GATHER_DURATIONS.push(start_time.elapsed()) }
+        println!(
+            "Rank {} finished the Allgather at {:?}",
+            rank,
+            Instant::now()
+        );
     }
 
     println!(
