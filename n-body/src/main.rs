@@ -104,12 +104,9 @@ static mut GATHER_DURATIONS: Vec<Duration> = vec![];
 
 /// Execute one parallelized step of the Barnes-Hut algorithm.
 ///
-/// 1. Create a tree from the local bodies.
-/// 2. Serialize the tree.
-/// 3. Share tree with other processes and gather from them.
-/// 4. Deserialize others' trees.
-/// 5. Merge others' trees into own.
-/// 6. Calculate forces recursively for the local bodies.
+/// 1. Create one subtree per thread in parallel.
+/// 2. Merge the trees into one big tree.
+/// 3. Calculate forces recursively for the local bodies in parallel.
 ///
 /// * `timestep`: Size of timesteps
 /// * `theta`: Theta threshold of the algorithm
@@ -148,15 +145,6 @@ fn barnes_hut(
     unsafe {
         SUBTREE_DURATIONS.push(start_time.elapsed());
     }
-
-    // println!(
-    //     "subtrees built! heights: {:?}; time since step started: {:.2?}",
-    //     thread_trees
-    //         .iter()
-    //         .map(|t| t.height())
-    //         .collect::<Vec<usize>>(),
-    //     start_time.elapsed()
-    // );
     start_time = Instant::now();
 
     // merge the trees to a big tree
@@ -167,10 +155,6 @@ fn barnes_hut(
     unsafe {
         MERGE_DURATIONS.push(start_time.elapsed());
     }
-    // println!(
-    //     "Trees merged! time since step started: {:.2?}",
-    //     start_time.elapsed()
-    // );
     start_time = Instant::now();
 
     // calculate forces, velocity and positions
@@ -187,10 +171,6 @@ fn barnes_hut(
     unsafe {
         CALC_DURATIONS.push(start_time.elapsed());
     }
-    // println!(
-    //     "Forces calculated! time since step started: {:.2?}",
-    //     start_time.elapsed()
-    // );
 }
 
 fn main() {
@@ -223,8 +203,8 @@ fn main() {
 
     let mut all_bodies = vec![Body::default(); filled_n];
 
+    // create initial bodies
     if is_root {
-        // create input
         let mut masses = generate_random_bounded(args.n_bodies, 0f64, args.mass_max);
         masses.extend(repeat(0f64).take(extra_n));
 
@@ -244,6 +224,7 @@ fn main() {
         }
     }
 
+    // share all bodies with all processes
     world
         .process_at_rank(ROOT_RANK as i32)
         .broadcast_into(&mut all_bodies);
@@ -279,6 +260,7 @@ fn main() {
         );
 
         let start_time = Instant::now();
+        // share bodies between all processes
         world.all_gather_into(&local_bodies, &mut all_bodies);
         unsafe { GATHER_DURATIONS.push(start_time.elapsed()) }
     }
@@ -309,7 +291,10 @@ fn main() {
     }
 }
 
-fn avg_duration(durations: &Vec<Duration>) -> Duration {
+/// Calculate the average duration from a list of durations.
+///
+/// * `durations`: Durations to calculate the avg for.
+fn avg_duration(durations: &[Duration]) -> Duration {
     assert!(!durations.is_empty());
 
     let mut summed_durs = durations[0];
@@ -317,7 +302,7 @@ fn avg_duration(durations: &Vec<Duration>) -> Duration {
     durations
         .iter()
         .skip(1)
-        .for_each(|d| summed_durs = summed_durs.checked_add(d.clone()).unwrap());
+        .for_each(|d| summed_durs = summed_durs.checked_add(*d).unwrap());
 
     summed_durs / durations.len() as u32
 }
