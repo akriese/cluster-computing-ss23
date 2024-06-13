@@ -1,6 +1,7 @@
 use super::Body;
 use super::G;
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Deserialize, Serialize)]
@@ -147,7 +148,7 @@ impl TreeNode {
     /// Merge to trees, consuming the given tree.
     ///
     /// * `other`: Another tree to be merged into self.
-    pub(crate) fn merge(&mut self, mut other: TreeNode) {
+    pub(crate) fn merge(&mut self, mut other: TreeNode, depth: usize) {
         // this assumes that two trees with the same size and center get merged
         assert!(self.size == other.size);
         assert!(self.center == other.center);
@@ -167,10 +168,16 @@ impl TreeNode {
             } else if other.children.is_empty() {
                 // empty case, other is empty quadrant and nothing to do here...
             } else {
-                for (self_child, other_child) in
-                    self.children.iter_mut().zip(other.children.into_iter())
-                {
-                    self_child.merge(other_child);
+                if depth > 3 {
+                    for (self_child, other_child) in
+                        self.children.iter_mut().zip(other.children.into_iter())
+                    {
+                        self_child.merge(other_child, depth + 1);
+                    }
+                } else {
+                    let ss = self.children.par_iter_mut();
+                    let os = other.children.into_par_iter();
+                    ss.zip(os).for_each(|(s, o)| s.merge(o, depth + 1));
                 }
 
                 self.mass = self.children.iter().map(|c| c.mass).sum();

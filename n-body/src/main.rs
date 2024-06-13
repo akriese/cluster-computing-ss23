@@ -155,7 +155,7 @@ fn barnes_hut(
         .drain(..)
         .par_bridge()
         .reduce_with(|mut a, b| {
-            a.merge(b);
+            a.merge(b, 0);
             a
         })
         .unwrap();
