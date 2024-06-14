@@ -1,7 +1,7 @@
 mod tree;
 
 use clap::Parser;
-use mpi::traits::*;
+use mpi::{topology::SimpleCommunicator, traits::*};
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -120,12 +120,20 @@ fn barnes_hut(
     all_bodies: &mut Vec<Body>,
     root: &mut TreeNode,
     n_threads: usize,
-    n_proc: usize,
     rank: usize,
+    world: &SimpleCommunicator,
 ) {
     let mut start_time = std::time::Instant::now();
 
     let bodies_per_thread = all_bodies.len() / n_threads;
+
+    start_time = Instant::now();
+    world.barrier();
+    println!(
+        "Rank {} waited {:.2?} at pre-subtreebuild barrier",
+        rank,
+        start_time.elapsed()
+    );
 
     // create NUM_THREADS trees in parallel
     let mut thread_trees = all_bodies
@@ -146,6 +154,15 @@ fn barnes_hut(
     unsafe {
         SUBTREE_DURATIONS.push(start_time.elapsed());
     }
+
+    start_time = Instant::now();
+    world.barrier();
+    println!(
+        "Rank {} waited {:.2?} at post-subtreebuild barrier",
+        rank,
+        start_time.elapsed()
+    );
+
     start_time = Instant::now();
 
     println!("merging on rank {}...", rank);
@@ -164,6 +181,15 @@ fn barnes_hut(
     unsafe {
         MERGE_DURATIONS.push(start_time.elapsed());
     }
+
+    start_time = Instant::now();
+    world.barrier();
+    println!(
+        "Rank {} waited {:.2?} at post-merge barrier",
+        rank,
+        start_time.elapsed()
+    );
+
     start_time = Instant::now();
 
     // calculate forces, velocity and positions
@@ -182,6 +208,14 @@ fn barnes_hut(
     unsafe {
         CALC_DURATIONS.push(start_time.elapsed());
     }
+
+    start_time = Instant::now();
+    world.barrier();
+    println!(
+        "Rank {} waited {:.2?} at post-forcecalc barrier",
+        rank,
+        start_time.elapsed()
+    );
 }
 
 fn main() {
@@ -264,8 +298,8 @@ fn main() {
             &mut all_bodies,
             &mut tree,
             n_threads,
-            world.size() as usize,
             rank,
+            &world,
         );
 
         let start_time = Instant::now();
