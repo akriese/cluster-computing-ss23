@@ -148,10 +148,10 @@ fn barnes_hut(
     }
     start_time = Instant::now();
 
-    println!("merging...");
+    println!("merging on rank {}...", rank);
 
     // merge the trees to a big tree, merge the trees in parallel
-    thread_trees
+    let root = thread_trees
         .drain(..)
         .par_bridge()
         .reduce_with(|mut a, b| {
@@ -159,7 +159,7 @@ fn barnes_hut(
             a
         })
         .unwrap();
-    println!("done...");
+    println!("done on rank {}...", rank);
 
     unsafe {
         MERGE_DURATIONS.push(start_time.elapsed());
