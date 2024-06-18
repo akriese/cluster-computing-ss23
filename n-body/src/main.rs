@@ -151,14 +151,13 @@ fn barnes_hut(
     println!("merging on rank {}...", rank);
 
     // merge the trees to a big tree, merge the trees in parallel
-    let root = thread_trees
-        .drain(..)
-        .par_bridge()
-        .reduce_with(|mut a, b| {
-            a.merge(b, 0);
+    let root = thread_trees.drain(..).par_bridge().reduce(
+        || root.clone(),
+        |mut a, b| {
+            a.merge(b, merge_threshold);
             a
-        })
-        .unwrap();
+        },
+    );
     println!("done on rank {}...", rank);
 
     unsafe {
